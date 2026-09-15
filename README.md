@@ -62,7 +62,7 @@ LLM 只能读取已经脱敏的采购说明并补充提示，不能降低规则�
 ## 项目架构
 
 ```text
-procurerpa-enterprise/
+procurerpa/
 ├── skyvern/                       # Skyvern 原生 Agent、Task、Workflow 和浏览器执行链
 ├── enterprise/                    # 企业采购扩展层
 │   ├── auth/                      # JWT 登录、角色权限和 Skyvern 认证桥接
@@ -79,11 +79,19 @@ procurerpa-enterprise/
 ├── skyvern-frontend/              # React 前端和企业页面
 ├── alembic/                       # Skyvern 与采购扩展数据库迁移
 ├── scripts/
-│   ├── demo_procurement_parity.py # P1～P5 采购语义单入口演示
+│   ├── demo_procurement_parity.py # P1～P6 采购语义单入口演示
 │   ├── seed_procurement_demo.py   # 唯一采购演示数据 seed
-│   └── smoke_procurement.py       # 采购主链一键验收
+│   ├── smoke_procurement.py       # 采购主链一键验收
+│   ├── ensure_enterprise_schema.py # 启动时确保企业表存在并初始化默认管理员
+│   └── test_gemini.py             # 配置的 Gemini 模型连通性自检
 ├── tests/                         # 最小相关单元测试与集成测试
+├── docs/                          # 架构、安全、开发流程与阶段契约文档
 ├── summaries/                     # 每个 Day 的功能、决策和验证记录
+├── nginx/                         # 反向代理与证书配置（prod 部署使用）
+├── assets/                        # 界面截图资源
+├── AGENTS.md                      # Agent 入口、硬约束与按需文档索引
+├── PROGRESS.md                    # 当前目标、活动任务、证据与阻塞
+├── DECISIONS.md                   # 重大技术取舍记录
 ├── docker-compose.yml             # PostgreSQL、Redis、MinIO、API 和前端
 ├── docker-compose.dev.yml         # 本地源码挂载与热重载
 ├── docker-compose.prod.yml        # 演示部署覆盖配置
@@ -113,8 +121,8 @@ procurerpa-enterprise/
 ### 1. 准备环境变量
 
 ```powershell
-git clone https://github.com/kublesd/procurerpa-enterprise.git
-Set-Location procurerpa-enterprise
+git clone https://github.com/kublesd/procurerpa.git
+Set-Location procurerpa
 Copy-Item .env.example .env
 ```
 
