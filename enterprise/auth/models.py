@@ -260,6 +260,7 @@ class TaskExtensionModel(Base):
         index=True,
     )
     category_id = Column(String, ForeignKey("procurement_categories.category_id"), nullable=True, index=True)
+    request_key_hash = Column(String(71), nullable=True)
     risk_level = Column(String, default=RiskLevel.LOW.value, nullable=False)
     risk_reason = Column(Text, nullable=True)
     risk_result = Column(JSON, nullable=True)
@@ -280,6 +281,11 @@ class TaskExtensionModel(Base):
         Index("idx_te_org_dept", "organization_id", "department_id"),
         Index("idx_te_org_bl", "organization_id", "business_line_id"),
         Index("idx_te_org_dept_category", "organization_id", "department_id", "category_id"),
+        UniqueConstraint(
+            "organization_id",
+            "request_key_hash",
+            name="uq_task_extension_org_request_key",
+        ),
         CheckConstraint(
             f"risk_level IN ('{RiskLevel.LOW.value}', '{RiskLevel.MEDIUM.value}', "
             f"'{RiskLevel.HIGH.value}', '{RiskLevel.CRITICAL.value}')",

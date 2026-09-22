@@ -61,6 +61,8 @@ class _Session:
         pass
 
     async def scalar(self, statement):
+        if "FROM tasks" in str(statement):
+            return next(iter(self.db.tasks.values()))
         approval_id = next(
             (value for key, value in statement.compile().params.items() if "approval_id" in key),
             None,
@@ -104,13 +106,14 @@ def _install(monkeypatch, approval=None):
     database = _Database(approval or _approval())
     monkeypatch.setattr(routes, "forge_app", SimpleNamespace(DATABASE=database))
     monkeypatch.setattr(routes, "record_audit_event", AsyncMock())
+    monkeypatch.setattr(routes, "write_audit_log", routes.record_audit_event)
     return database
 
 
 @pytest.mark.asyncio
 async def test_pending_list_and_approve_are_database_backed(monkeypatch):
     database = _install(monkeypatch)
-    audit = routes.record_audit_event
+    audit = routes.write_audit_log
     approver = _user("approver_1", "approver")
 
     pending = await routes.list_pending_approvals(approver)
@@ -194,7 +197,7 @@ async def test_reject_snapshots_approval_before_nested_task_commit(monkeypatch):
 @pytest.mark.asyncio
 async def test_approved_task_continues_through_skyvern_executor(monkeypatch):
     database = _install(monkeypatch)
-    audit = routes.record_audit_event
+    audit = routes.write_audit_log
     calls = []
 
     class Executor:

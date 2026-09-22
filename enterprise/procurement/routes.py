@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
 import logging
 from decimal import Decimal
 from pathlib import Path
@@ -17,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from enterprise import __version__
 from enterprise.approval.models import DEFAULT_TIMEOUTS, ApprovalRequestModel, generate_approval_id
 from enterprise.approval.risk_detector import RiskAssessment, RiskContext, detect_risk
-from enterprise.audit.logger import record_audit_event
+from enterprise.audit.logger import write_audit_log
 from enterprise.audit.models import ActionType
 from enterprise.audit.sanitizer import sanitize_input
 from enterprise.auth.dependencies import CurrentUser, require_any_operator
@@ -27,7 +28,12 @@ from enterprise.auth.schemas import UserContext
 from enterprise.llm.human_intervention import ResolutionAction
 from enterprise.notification.dispatcher import notify_approval_created
 from enterprise.notification.templates import ApprovalNotificationContext
-from enterprise.procurement.comparison import compare_quotes, normalize_money, normalize_quantity
+from enterprise.procurement.comparison import (
+    IncomparableQuotesError,
+    compare_quotes,
+    normalize_money,
+    normalize_quantity,
+)
 from enterprise.procurement.models import (
     HumanReviewStatus,
     ProcurementCategoryModel,
@@ -36,11 +42,13 @@ from enterprise.procurement.models import (
     generate_human_review_id,
     generate_supplier_quote_id,
 )
+from enterprise.procurement.quote_state import advance_quote_state, load_quote_state, quote_state_response
 from enterprise.tenant.context import tenant_context_for
 from enterprise.tenant.query_filter import apply_tenant_filter, filter_task_extensions
 from skyvern.config import is_development_environment, settings
 from skyvern.forge import app as forge_app
 from skyvern.forge.sdk.db.models import ArtifactModel, TaskModel
+from skyvern.forge.sdk.executor.factory import AsyncExecutorFactory
 from skyvern.forge.sdk.schemas.tasks import Task, TaskRequest, TaskStatus
 from skyvern.services import task_v1_service
 
@@ -346,12 +354,7 @@ async def _validate_quote_context(
     payload: QuoteCreateRequest,
     user: UserContext,
 ) -> None:
-    scope = tenant_context_for(user)
-    if not scope.has_full_org_visibility and (
-        payload.department_id not in scope.visible_department_ids
-        or payload.category_id not in scope.visible_category_ids
-    ):
-        raise HTTPException(status_code=403, detail="Quote context is outside the authenticated scope")
+    _assert_procurement_operator(user, user.org_id, payload.department_id, payload.category_id)
 
     task_context = await session.scalar(
         select(TaskExtensionModel)
@@ -411,6 +414,14 @@ async def _persist_supplier_quote(
         created_by=user.user_id,
     )
     session.add(quote)
+    task = await session.scalar(select(TaskModel).where(
+        TaskModel.task_id == payload.task_id, TaskModel.organization_id == user.org_id,
+    ))
+    if task is not None and getattr(task, "data_extraction_goal", None) == _QUOTE_EXTRACTION_GOAL:
+        await advance_quote_state(
+            session, task_id=payload.task_id, org_id=user.org_id, department_id=payload.department_id,
+            executor=user.user_id, step="completed",
+        )
     if commit:
         await session.commit()
         # commit 后默认 expire_on_commit=True 会使实例属性过期；调用方在 Session 关闭后
@@ -426,8 +437,11 @@ async def create_supplier_quote(
     payload: QuoteCreateRequest,
     user: UserContext = Depends(require_any_operator),
 ) -> QuoteResponse:
-    async with forge_app.DATABASE.Session() as session:
-        quote = await _persist_supplier_quote(session, payload, user)
+    try:
+        async with forge_app.DATABASE.Session() as session:
+            quote = await _persist_supplier_quote(session, payload, user)
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="A quote already exists for this task") from exc
     return _quote_response(quote)
 
 
@@ -447,7 +461,10 @@ def _comparison_response(
     task_id: str | None = None,
     task_ids: list[str] | None = None,
 ) -> QuoteComparisonResponse:
-    result = compare_quotes(quotes)
+    try:
+        result = compare_quotes(quotes)
+    except IncomparableQuotesError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     quotes_by_id = {quote.quote_id: quote for quote in quotes}
     return QuoteComparisonResponse(
         task_id=task_id,
@@ -504,6 +521,9 @@ async def get_supplier_quote(quote_id: str, user: CurrentUser) -> QuoteResponse:
 
 
 _QUOTE_REVIEW_FAILURES = {
+    "Quote execution was interrupted": (
+        "quote_execution_interrupted", "Quote execution was interrupted; browser actions must not be replayed",
+    ),
     "Skyvern task did not complete": ("task_not_completed", "Skyvern quote task did not complete"),
     "Required quote fields are missing or have invalid types": (
         "quote_schema_invalid",
@@ -553,15 +573,17 @@ def _human_review_query(user: UserContext, review_id: str | None = None):
     return query
 
 
-def _assert_review_operator(user: UserContext, review: ProcurementHumanReviewModel) -> None:
-    if review.organization_id != user.org_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-organization review access is forbidden")
+def _assert_procurement_operator(
+    user: UserContext, organization_id: str, department_id: str, category_id: str,
+) -> None:
+    if organization_id != user.org_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-organization write access is forbidden")
     if user.is_org_admin:
         return
-    if user.get_role_in_department(review.department_id) not in ("operator", "org_admin", "super_admin"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Review is outside the user's department")
-    if not user.has_procurement_category(review.category_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Review is outside the user's procurement category")
+    if user.get_role_in_department(department_id) != "operator":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Operator role required in the target department")
+    if not user.has_procurement_category(category_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Write is outside the user's procurement category")
 
 
 async def _create_or_get_quote_human_review(
@@ -629,8 +651,25 @@ async def _create_or_get_quote_human_review(
             created_by=user.user_id,
         )
         # The task-scoped unique index is the final idempotency guard under concurrent retries.
-        session.add(review)
         try:
+            session.add(review)
+            await advance_quote_state(
+                session, task_id=task_id, org_id=user.org_id, department_id=payload.department_id,
+                executor=user.user_id, step="needs_human",
+            )
+            await write_audit_log(session, commit=False,
+                task_id=review.task_id,
+                org_id=review.organization_id,
+                department_id=review.department_id,
+                business_object_type="procurement_human_review",
+                business_object_id=review.review_id,
+                action_index=review.action_index,
+                action_type=ActionType.HUMAN_REVIEW_CREATED.value,
+                executor=review.created_by,
+                input_value={"reason_code": review.reason_code, "review_id": review.review_id},
+                execution_result=HumanReviewStatus.PENDING.value,
+                error_message=review.safe_error_summary,
+            )
             await session.commit()
             if hasattr(session, "refresh"):
                 await session.refresh(review)
@@ -647,19 +686,6 @@ async def _create_or_get_quote_human_review(
                 raise
             review = pending
 
-    await record_audit_event(
-        task_id=review.task_id,
-        org_id=review.organization_id,
-        department_id=review.department_id,
-        business_object_type="procurement_human_review",
-        business_object_id=review.review_id,
-        action_index=review.action_index,
-        action_type=ActionType.HUMAN_REVIEW_CREATED.value,
-        executor=review.created_by,
-        input_value={"reason_code": review.reason_code, "review_id": review.review_id},
-        execution_result=HumanReviewStatus.PENDING.value,
-        error_message=review.safe_error_summary,
-    )
     return review
 
 
@@ -754,7 +780,7 @@ async def resolve_human_review(
         review = await session.scalar(_human_review_query(user, review_id).with_for_update())
         if review is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Human review not found")
-        _assert_review_operator(user, review)
+        _assert_procurement_operator(user, review.organization_id, review.department_id, review.category_id)
         if review.status != HumanReviewStatus.PENDING.value:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Human review is already {review.status}")
 
@@ -809,29 +835,34 @@ async def resolve_human_review(
         review.resolution_action = body.action.value
         review.resolution_note = sanitize_input(body.note) or ""
         review.resolved_at = now
+        if review.action_type == "quote_extraction":
+            await advance_quote_state(
+                session, task_id=review.task_id, org_id=user.org_id, department_id=review.department_id,
+                executor=user.user_id, step={"manual_complete": "completed", "terminate": "terminated", "skip_step": "skipped"}[body.action.value],
+            )
+        await write_audit_log(session, commit=False,
+            task_id=review.task_id,
+            org_id=review.organization_id,
+            department_id=review.department_id,
+            business_object_type="procurement_human_review",
+            business_object_id=review.review_id,
+            action_index=review.action_index,
+            action_type=(
+                ActionType.HUMAN_REVIEW_TERMINATED.value
+                if body.action is ResolutionAction.TERMINATE
+                else ActionType.HUMAN_REVIEW_RESOLVED.value
+            ),
+            executor=user.user_id,
+            input_value={"resolution_action": body.action.value, "review_id": review.review_id},
+            execution_result=review.status,
+            error_message=body.note or None,
+        )
         await session.commit()
         if hasattr(session, "refresh"):
             await session.refresh(review)
             if quote is not None:
                 await session.refresh(quote)
 
-    await record_audit_event(
-        task_id=review.task_id,
-        org_id=review.organization_id,
-        department_id=review.department_id,
-        business_object_type="procurement_human_review",
-        business_object_id=review.review_id,
-        action_index=review.action_index,
-        action_type=(
-            ActionType.HUMAN_REVIEW_TERMINATED.value
-            if body.action is ResolutionAction.TERMINATE
-            else ActionType.HUMAN_REVIEW_RESOLVED.value
-        ),
-        executor=user.user_id,
-        input_value={"resolution_action": body.action.value, "review_id": review.review_id},
-        execution_result=review.status,
-        error_message=body.note or None,
-    )
     response = HumanReviewResolutionResponse(**_human_review_response(review).model_dump())
     response.quote_id = quote.quote_id if quote is not None else None
     response.task_status = task_status
@@ -897,10 +928,38 @@ class QuoteTaskResponse(SmokeTaskResponse):
     artifact_id: str | None = None
 
 
-_SMOKE_TASKS: dict[tuple[str, str], tuple[str, str | None]] = {}
-_QUOTE_TASKS: dict[tuple[str, str], tuple[str, str | None, str | None, str | None]] = {}
 _SMOKE_LOCK = asyncio.Lock()
 _SMOKE_PROMPT = "On the allowlisted example page, click the 'More information' link and report completion."
+
+
+def _request_key_hash(kind: str, idempotency_key: str) -> str:
+    return f"{kind}:{hashlib.sha256(idempotency_key.encode()).hexdigest()}"
+
+
+async def _persisted_request(organization_id: str, request_key_hash: str) -> tuple[str, str | None] | None:
+    async with forge_app.DATABASE.Session() as session:
+        context = await session.scalar(
+            select(TaskExtensionModel).where(
+                TaskExtensionModel.organization_id == organization_id,
+                TaskExtensionModel.request_key_hash == request_key_hash,
+            )
+        )
+        if context is None:
+            return None
+        approval_id = await session.scalar(
+            select(ApprovalRequestModel.approval_id).where(
+                ApprovalRequestModel.task_id == context.task_id,
+                ApprovalRequestModel.organization_id == organization_id,
+            )
+        )
+    return context.task_id, approval_id
+
+
+async def _cancel_orphan_task(task_id: str, organization_id: str) -> None:
+    try:
+        await forge_app.DATABASE.update_task(task_id, status=TaskStatus.canceled, organization_id=organization_id)
+    except Exception as exc:
+        logger.warning("IDEMPOTENCY_ORPHAN_CANCEL_FAILED task=%s error_type=%s", task_id, type(exc).__name__)
 
 
 def _component_ok(detail: str) -> ComponentHealth:
@@ -1007,6 +1066,7 @@ async def _attach_procurement_context(
     payload: SmokeTaskRequest,
     user: UserContext,
     risk: RiskAssessment,
+    request_key_hash: str | None = None,
 ) -> str | None:
     approval = None
     async with forge_app.DATABASE.Session() as session:
@@ -1018,6 +1078,7 @@ async def _attach_procurement_context(
             risk_level=risk.risk_level,
             risk_reason=risk.reason,
             risk_result=risk.to_dict(),
+            request_key_hash=request_key_hash,
             created_by=user.user_id,
         ))
         if risk.risk_level in ("high", "critical"):
@@ -1036,54 +1097,54 @@ async def _attach_procurement_context(
                 timeout_seconds=DEFAULT_TIMEOUTS[risk.risk_level],
             )
             session.add(approval)
-        await session.commit()
-    common = {
-        "task_id": task_id,
-        "org_id": user.org_id,
-        "department_id": payload.department_id,
-        "executor": user.user_id,
-    }
-    await record_audit_event(
-        **common,
-        business_object_type="procurement_task",
-        business_object_id=task_id,
-        action_index=0,
-        action_type=ActionType.RISK_ASSESSED.value,
-        input_value=risk.to_dict(),
-    )
-    await record_audit_event(
-        **common,
-        business_object_type="procurement_task",
-        business_object_id=task_id,
-        action_index=1,
-        action_type=ActionType.PROCUREMENT_SUBMITTED.value,
-        input_value={"risk_level": risk.risk_level, "requires_approval": approval is not None},
-        execution_result="pending_approval" if approval else "submitted",
-        has_approval=approval is not None,
-        approval_id=approval_id if approval else None,
-    )
-    if approval:
-        await record_audit_event(
+        common = {
+            "task_id": task_id,
+            "org_id": user.org_id,
+            "department_id": payload.department_id,
+            "executor": user.user_id,
+        }
+        await write_audit_log(session, commit=False,
             **common,
-            business_object_type="approval",
-            business_object_id=approval_id,
-            action_index=2,
-            action_type=ActionType.APPROVAL_REQUESTED.value,
-            input_value={"risk_level": risk.risk_level, "timeout_seconds": DEFAULT_TIMEOUTS[risk.risk_level]},
-            execution_result="pending",
-            has_approval=True,
-            approval_id=approval_id,
+            business_object_type="procurement_task",
+            business_object_id=task_id,
+            action_index=0,
+            action_type=ActionType.RISK_ASSESSED.value,
+            input_value=risk.to_dict(),
         )
+        await write_audit_log(session, commit=False,
+            **common,
+            business_object_type="procurement_task",
+            business_object_id=task_id,
+            action_index=1,
+            action_type=ActionType.PROCUREMENT_SUBMITTED.value,
+            input_value={"risk_level": risk.risk_level, "requires_approval": approval is not None},
+            execution_result="pending_approval" if approval else "submitted",
+            has_approval=approval is not None,
+            approval_id=approval_id if approval else None,
+        )
+        if approval:
+            await write_audit_log(session, commit=False,
+                **common,
+                business_object_type="approval",
+                business_object_id=approval_id,
+                action_index=2,
+                action_type=ActionType.APPROVAL_REQUESTED.value,
+                input_value={"risk_level": risk.risk_level, "timeout_seconds": DEFAULT_TIMEOUTS[risk.risk_level]},
+                execution_result="pending",
+                has_approval=True,
+                approval_id=approval_id,
+            )
+        if isinstance(payload, QuoteTaskRequest):
+            await advance_quote_state(
+                session, task_id=task_id, org_id=user.org_id, department_id=payload.department_id,
+                executor=user.user_id, step="awaiting_approval" if approval else "ready",
+            )
+        await session.commit()
     return approval_id if approval else None
 
 
 async def _validate_smoke_context(payload: SmokeTaskRequest, user: UserContext) -> None:
-    scope = tenant_context_for(user)
-    if not scope.has_full_org_visibility and (
-        payload.department_id not in scope.visible_department_ids
-        or payload.category_id not in scope.visible_category_ids
-    ):
-        raise HTTPException(status_code=403, detail="Smoke task context is outside the authenticated scope")
+    _assert_procurement_operator(user, payload.organization_id, payload.department_id, payload.category_id)
 
     async with forge_app.DATABASE.Session() as session:
         department = await session.scalar(select(DepartmentModel.department_id).where(
@@ -1098,6 +1159,132 @@ async def _validate_smoke_context(payload: SmokeTaskRequest, user: UserContext) 
         raise HTTPException(status_code=422, detail="Smoke task department or category is not in the authenticated organization")
 
 
+async def quote_continuation_payload(task: Task, user: UserContext) -> QuoteTaskRequest | None:
+    """Recover quote context from persisted facts, including after a restart."""
+    if (
+        getattr(task, "data_extraction_goal", None) != _QUOTE_EXTRACTION_GOAL
+        or getattr(task, "extracted_information_schema", None) != QUOTE_EXTRACTION_SCHEMA
+    ):
+        return None
+    async with forge_app.DATABASE.Session() as session:
+        context = await session.scalar(select(TaskExtensionModel).where(
+            TaskExtensionModel.task_id == task.task_id,
+            TaskExtensionModel.organization_id == user.org_id,
+        ))
+    if context is None:
+        raise HTTPException(status_code=404, detail="Procurement task context not found")
+    _assert_procurement_operator(user, context.organization_id, context.department_id, context.category_id)
+    return QuoteTaskRequest(
+        organization_id=context.organization_id,
+        department_id=context.department_id,
+        category_id=context.category_id,
+        url=task.url,
+    )
+
+
+async def recover_quote_task(task_id: str, user: UserContext, expected_version: int | None = None) -> SupplierQuoteModel:
+    """Serialize initial execution and explicit recovery across API processes."""
+    task = await _get_smoke_task(task_id, user.org_id)
+    payload = await quote_continuation_payload(task, user)
+    if payload is None:
+        raise HTTPException(status_code=409, detail="Task is not a procurement quote task")
+    # ponytail: one DB connection held per execution; use fenced leases only if pool pressure warrants it.
+    async with forge_app.DATABASE.Session() as claim:
+        context = await claim.scalar(select(TaskExtensionModel).where(
+            TaskExtensionModel.task_id == task_id,
+            TaskExtensionModel.organization_id == user.org_id,
+        ).with_for_update(skip_locked=True))
+        if context is None:
+            raise HTTPException(status_code=409, detail="Quote task is already being executed or recovered")
+        _assert_procurement_operator(user, context.organization_id, context.department_id, context.category_id)
+        approval = await claim.scalar(select(ApprovalRequestModel).where(
+            ApprovalRequestModel.task_id == task_id,
+            ApprovalRequestModel.organization_id == user.org_id,
+        ))
+        if approval is not None:
+            if approval.requester_user_id != user.user_id and not user.is_org_admin:
+                raise HTTPException(status_code=403, detail="Only the requester can continue this task")
+            if approval.status != "approved":
+                raise HTTPException(status_code=409, detail="Only approved tasks can continue")
+        elif context.risk_level in ("high", "critical"):
+            raise HTTPException(status_code=409, detail="Quote approval is unavailable")
+
+        if expected_version is not None:
+            state = await load_quote_state(claim, task_id, user.org_id)
+            if expected_version != (state.version if state is not None else 0):
+                raise HTTPException(409, "Quote state version conflict")
+        existing = await claim.scalar(_quote_query(user, task_id=task_id))
+        if existing is not None:
+            return existing
+        review = await claim.scalar(select(ProcurementHumanReviewModel).where(
+            ProcurementHumanReviewModel.task_id == task_id,
+            ProcurementHumanReviewModel.organization_id == user.org_id,
+        ))
+        if review is not None:
+            raise HTTPException(status_code=409, detail={
+                "code": "quote_recovery_requires_human", "review_id": review.review_id,
+                "review_status": review.status, "enterprise_status": "needs_human",
+            })
+        task = await _get_smoke_task(task_id, user.org_id)
+        if task.status == TaskStatus.created:
+            # Commit native uncertainty marker, enterprise step and audit before browser side effects.
+            async with forge_app.DATABASE.Session() as session:
+                native = await session.scalar(select(TaskModel).where(
+                    TaskModel.task_id == task_id, TaskModel.organization_id == user.org_id,
+                ).with_for_update())
+                if native is None or native.status != TaskStatus.created:
+                    raise HTTPException(409, "Quote task state changed")
+                native.status = TaskStatus.running
+                await advance_quote_state(
+                    session, task_id=task_id, org_id=user.org_id, department_id=payload.department_id,
+                    executor=user.user_id, step="running",
+                )
+                await write_audit_log(session, commit=False,
+                    task_id=task_id, org_id=user.org_id, department_id=payload.department_id,
+                    business_object_type="approval" if approval else "procurement_task",
+                    business_object_id=approval.approval_id if approval else task_id,
+                    action_index=5, action_type=ActionType.TASK_CONTINUED.value,
+                    executor=user.user_id, execution_result="running",
+                    has_approval=approval is not None,
+                    approval_id=approval.approval_id if approval else None,
+                    approver_user_id=approval.approver_user_id if approval else None,
+                )
+                await session.commit()
+            execution_tasks = BackgroundTasks()
+            try:
+                await AsyncExecutorFactory.get_executor().execute_task(
+                    request=None, background_tasks=execution_tasks, task_id=task_id,
+                    organization_id=user.org_id, max_steps_override=None,
+                    browser_session_id=task.browser_session_id, api_key=None,
+                )
+                await execution_tasks()
+            except Exception:
+                raise await _quote_needs_human_confirmation(
+                    task_id, "Quote execution was interrupted", payload, user,
+                ) from None
+            task = await _get_smoke_task(task_id, user.org_id)
+        if task.status != TaskStatus.completed:
+            raise await _quote_needs_human_confirmation(
+                task_id, "Quote execution was interrupted", payload, user,
+            )
+        return await _persist_extracted_quote(task, payload, user)
+
+
+@router.get("/tasks/{task_id}/quote-state")
+async def get_quote_state(task_id: str, user: CurrentUser) -> dict:
+    await get_procurement_task(task_id, user)
+    async with forge_app.DATABASE.Session() as session:
+        row = await load_quote_state(session, task_id, user.org_id)
+        return {"state": quote_state_response(row)}
+
+
+@router.post("/tasks/{task_id}/recover-quote", response_model=QuoteResponse)
+async def recover_quote(
+    task_id: str, user: UserContext = Depends(require_any_operator), expected_version: int | None = None,
+) -> QuoteResponse:
+    return _quote_response(await recover_quote_task(task_id, user, expected_version))
+
+
 async def _persist_extracted_quote(
     task: Task,
     payload: QuoteTaskRequest,
@@ -1105,6 +1292,15 @@ async def _persist_extracted_quote(
 ) -> SupplierQuoteModel:
     if task.status != TaskStatus.completed:
         raise await _quote_needs_human_confirmation(task.task_id, "Skyvern task did not complete", payload, user)
+    async with forge_app.DATABASE.Session() as session:
+        existing = await session.scalar(
+            select(SupplierQuoteModel).where(
+                SupplierQuoteModel.task_id == task.task_id,
+                SupplierQuoteModel.organization_id == user.org_id,
+            )
+        )
+    if existing is not None:
+        return existing
     try:
         extracted = ExtractedSupplierQuote.model_validate(task.extracted_information)
     except ValidationError as exc:
@@ -1141,25 +1337,36 @@ async def _persist_extracted_quote(
                 payload,
                 user,
             )
-        quote = await _persist_supplier_quote(
-            session,
-            QuoteCreateRequest(
-                task_id=task.task_id,
-                department_id=payload.department_id,
-                category_id=payload.category_id,
-                supplier_id=extracted.supplier_id,
-                material_name=extracted.material_name,
-                quantity=extracted.quantity,
-                unit=extracted.unit,
-                currency=extracted.currency,
-                unit_price_cny=extracted.unit_price_cny,
-                freight_cny=extracted.freight_cny,
-                moq=extracted.moq,
-                delivery_days=extracted.delivery_days,
-                artifact_id=artifact_id,
-            ),
-            user,
-        )
+        try:
+            quote = await _persist_supplier_quote(
+                session,
+                QuoteCreateRequest(
+                    task_id=task.task_id,
+                    department_id=payload.department_id,
+                    category_id=payload.category_id,
+                    supplier_id=extracted.supplier_id,
+                    material_name=extracted.material_name,
+                    quantity=extracted.quantity,
+                    unit=extracted.unit,
+                    currency=extracted.currency,
+                    unit_price_cny=extracted.unit_price_cny,
+                    freight_cny=extracted.freight_cny,
+                    moq=extracted.moq,
+                    delivery_days=extracted.delivery_days,
+                    artifact_id=artifact_id,
+                ),
+                user,
+            )
+        except IntegrityError:
+            await session.rollback()
+            quote = await session.scalar(
+                select(SupplierQuoteModel).where(
+                    SupplierQuoteModel.task_id == task.task_id,
+                    SupplierQuoteModel.organization_id == user.org_id,
+                )
+            )
+            if quote is None:
+                raise
     return quote
 
 
@@ -1266,10 +1473,9 @@ async def smoke_task(
         raise HTTPException(status_code=400, detail="Smoke task URL is not allowlisted")
     await _validate_smoke_context(payload, user)
 
-    cache_key = (payload.organization_id, idempotency_key)
-    # ponytail: serializes development smoke runs; use DB-backed idempotency only for multi-process deployment.
+    request_key_hash = _request_key_hash("smoke", idempotency_key)
     async with _SMOKE_LOCK:
-        if stored := _SMOKE_TASKS.get(cache_key):
+        if stored := await _persisted_request(payload.organization_id, request_key_hash):
             task_id, approval_id = stored
             return _smoke_response(
                 await _get_smoke_task(task_id, payload.organization_id),
@@ -1295,11 +1501,24 @@ async def smoke_task(
             raise HTTPException(status_code=503, detail="Smoke task could not be created by Skyvern") from exc
 
         try:
-            approval_id = await _attach_procurement_context(created_task.task_id, payload, user, risk)
+            approval_id = await _attach_procurement_context(
+                created_task.task_id, payload, user, risk, request_key_hash,
+            )
+        except IntegrityError as exc:
+            stored = await _persisted_request(payload.organization_id, request_key_hash)
+            if stored is None:
+                raise HTTPException(status_code=503, detail="Smoke task idempotency could not be resolved") from exc
+            await _cancel_orphan_task(created_task.task_id, payload.organization_id)
+            task_id, approval_id = stored
+            return _smoke_response(
+                await _get_smoke_task(task_id, payload.organization_id),
+                True,
+                response,
+                approval_id,
+            )
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Smoke task procurement context could not be saved") from exc
 
-        _SMOKE_TASKS[cache_key] = (created_task.task_id, approval_id)
         if approval_id:
             _schedule_approval_notification(background_tasks, approval_id, created_task.task_id, risk, payload, user)
             return _smoke_response(created_task, False, response, approval_id)
@@ -1343,22 +1562,27 @@ async def quote_task(
         raise HTTPException(status_code=400, detail="Quote task URL is not allowlisted")
     await _validate_smoke_context(payload, user)
 
-    cache_key = (payload.organization_id, idempotency_key)
+    request_key_hash = _request_key_hash("quote", idempotency_key)
     async with _SMOKE_LOCK:
-        if stored := _QUOTE_TASKS.get(cache_key):
-            task_id, approval_id, quote_id, artifact_id = stored
+        if stored := await _persisted_request(payload.organization_id, request_key_hash):
+            task_id, approval_id = stored
+            await get_procurement_task(task_id, user)
+            async with forge_app.DATABASE.Session() as session:
+                quote = await session.scalar(_quote_query(user, task_id=task_id))
+            task = await _get_smoke_task(task_id, payload.organization_id)
+            if quote is None and not (approval_id and task.status == TaskStatus.created):
+                quote = await recover_quote_task(task_id, user)
+                task = await _get_smoke_task(task_id, payload.organization_id)
             return _quote_task_response(
-                await _get_smoke_task(task_id, payload.organization_id),
+                task,
                 True,
                 response,
                 approval_id,
-                quote_id,
-                artifact_id,
+                quote.quote_id if quote is not None else None,
+                quote.artifact_id if quote is not None else None,
             )
 
         risk = await detect_risk(payload.risk.to_context())
-        requires_approval = risk.risk_level in ("high", "critical")
-        execution_tasks = BackgroundTasks()
         task_request = TaskRequest(
             title="ProcureRPA Day 11 supplier quote",
             url=payload.url,
@@ -1371,8 +1595,8 @@ async def quote_task(
                 request=request,
                 organization_id=payload.organization_id,
                 url=payload.url,
-                background_tasks=execution_tasks,
-                defer_execution=requires_approval,
+                background_tasks=BackgroundTasks(),
+                defer_execution=True,
                 task_request=task_request,
             )
         except HTTPException:
@@ -1381,27 +1605,40 @@ async def quote_task(
             raise HTTPException(status_code=503, detail="Quote task could not be created by Skyvern") from exc
 
         try:
-            approval_id = await _attach_procurement_context(created_task.task_id, payload, user, risk)
+            approval_id = await _attach_procurement_context(
+                created_task.task_id, payload, user, risk, request_key_hash,
+            )
+        except IntegrityError as exc:
+            stored = await _persisted_request(payload.organization_id, request_key_hash)
+            if stored is None:
+                raise HTTPException(status_code=503, detail="Quote task idempotency could not be resolved") from exc
+            await _cancel_orphan_task(created_task.task_id, payload.organization_id)
+            task_id, approval_id = stored
+            async with forge_app.DATABASE.Session() as session:
+                quote = await session.scalar(_quote_query(user, task_id=task_id))
+            return _quote_task_response(
+                await _get_smoke_task(task_id, payload.organization_id),
+                True,
+                response,
+                approval_id,
+                quote.quote_id if quote is not None else None,
+                quote.artifact_id if quote is not None else None,
+            )
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Quote task procurement context could not be saved") from exc
 
-        _QUOTE_TASKS[cache_key] = (created_task.task_id, approval_id, None, None)
         if approval_id:
             _schedule_approval_notification(background_tasks, approval_id, created_task.task_id, risk, payload, user)
             return _quote_task_response(created_task, False, response, approval_id)
 
         try:
-            await execution_tasks()
+            quote = await recover_quote_task(created_task.task_id, user)
             completed_task = await _get_smoke_task(created_task.task_id, payload.organization_id)
-            quote = await _persist_extracted_quote(completed_task, payload, user)
         except HTTPException:
-            _QUOTE_TASKS.pop(cache_key, None)
             raise
         except Exception as exc:
-            _QUOTE_TASKS.pop(cache_key, None)
             raise HTTPException(status_code=502, detail="Extracted supplier quote could not be saved") from exc
 
-        _QUOTE_TASKS[cache_key] = (created_task.task_id, None, quote.quote_id, quote.artifact_id)
         return _quote_task_response(
             completed_task,
             False,

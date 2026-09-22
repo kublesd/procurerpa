@@ -195,6 +195,7 @@ class SupplierQuoteModel(Base):
     )
 
     __table_args__ = (
+        UniqueConstraint("task_id", name="uq_supplier_quote_task"),
         Index("idx_supplier_quote_org_task", "organization_id", "task_id"),
         Index("idx_supplier_quote_scope", "organization_id", "department_id", "category_id"),
         CheckConstraint("quantity > 0", name="ck_supplier_quote_positive_quantity"),
