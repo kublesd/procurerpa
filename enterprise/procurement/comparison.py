@@ -9,6 +9,10 @@ QUANTITY_QUANTUM = Decimal("0.000001")
 LANDED_UNIT_QUANTUM = Decimal("0.000001")
 
 
+class IncomparableQuotesError(ValueError):
+    """Quotes do not describe the same material and requested quantity."""
+
+
 def _decimal(value: Decimal | str | int) -> Decimal:
     try:
         result = value if isinstance(value, Decimal) else Decimal(str(value))
@@ -54,8 +58,15 @@ def compare_quotes(quotes: Iterable[object]) -> QuoteComparisonResult:
     """Rank quotes by landed unit price with stable deterministic tie-breakers."""
 
     items: list[QuoteComparisonItem] = []
+    comparison_key = None
     for quote in quotes:
         quantity = normalize_quantity(getattr(quote, "quantity"))
+        # ponytail: exact material names; use an authoritative SKU when the quote model has one.
+        material = getattr(quote, "material_name").strip()
+        key = (material, quantity, getattr(quote, "unit"), getattr(quote, "currency"))
+        if not material or (comparison_key is not None and key != comparison_key):
+            raise IncomparableQuotesError("Quotes must have the same material, quantity, unit, and currency")
+        comparison_key = key
         moq = normalize_quantity(getattr(quote, "moq"))
         unit_price = normalize_money(getattr(quote, "unit_price_cny"))
         freight = normalize_money(getattr(quote, "freight_cny"))

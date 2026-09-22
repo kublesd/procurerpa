@@ -119,3 +119,35 @@
 - 原因：文件上传接口需要向调用方返回短期预签名 URL，但通用 response logger 不得把该 URL写入普通日志。
 - 取舍：在共享精确字段脱敏集合中加入 `presigned_url`，仅把日志值替换为 `****`，不改变 API response 或 MinIO 对象引用。
 - 约束：日志回归测试必须证明 `X-Amz-*` 查询值不落日志；业务库仍只保存 `minio://` object URI。
+
+## 2026-09-21：真实 smoke 不再作为项目完成门
+
+- 原因：用户明确要求去掉真实 smoke 验收。
+- 取舍：项目状态以已有工程验证为完成依据，不再要求当前源码下的真实 quotes/controls smoke、数据库或浏览器联调后才能认定完成。
+- 约束：该取舍不把未运行或失败的历史 smoke 重新标记为通过；历史证据继续按来源保留，未来只有在用户明确安排时才运行真实 smoke。
+
+## 2026-09-21：审批报价后处理同步收口并复用现有数据库事实
+
+- 原因：响应后的进程内 BackgroundTasks 在进程中断时会丢失报价入库；进程内幂等字典也不能跨重启或多进程复用。
+- 取舍：不引入新队列。报价审批 continue 在返回前完成原生执行和入库/人工复核；完成 Task 可按现有 Task、TaskExtension 和 SupplierQuote 重试恢复。请求幂等键以用途前缀加 SHA-256 摘要存入 TaskExtension，数据库唯一约束负责并发兜底。
+- 约束：每个 Task 只允许一条 SupplierQuote；该方案不承诺 Skyvern 原生浏览器执行中途崩溃后的自动续跑，后者仍需独立任务。
+
+## 2026-09-22：RUN-01 使用数据库独占 claim 和显式恢复，不重放歧义浏览器动作
+
+- 原因：原生执行器可能已经提交页面动作，单凭 Task.running 或超时无法证明重放安全；仅在审批行加锁也无法覆盖直接报价入口和报价后处理。
+- 取舍：报价创建统一 defer execution，先持久化 TaskExtension/审批，再通过同一个恢复函数取得该 TaskExtension 的 PostgreSQL `FOR UPDATE SKIP LOCKED`。持锁贯穿执行与后处理，另一个数据库事务在调用原生执行器前提交 Task.running。无需新增表、迁移或消息服务。
+- 恢复规则：created 可启动；completed 仅校验并幂等补报价；其他状态及执行异常进入持久人工核验；存在人工处置记录时不自动重跑。高风险仍检查已批准事实和发起人/管理员身份。
+- 触发：quote-task 幂等重试、审批 continue 或 `POST /enterprise/procurement/tasks/{task_id}/recover-quote`；不增加后台扫描器。API 实际前缀沿用 `/api/v1`。
+- 锁与接管：不使用基于耗时的 lease，不强抢存活连接；连接/事务结束后数据库释放锁，在断连被数据库确认前返回 409。执行期间占用一个额外数据库连接，连接池压力有实际证据时才考虑带 fencing 的 lease。
+- 保留：自动续跑中断浏览器步骤仍不承诺；审计继续复用现有 writer，其 best-effort 与业务事务原子性属于 STATE-01。进程崩溃测试使用合成 Task/Artifact 和受控执行器，不代表真实浏览器 smoke。
+
+
+## 2026-09-22：STATE-01 先收口 quote-task 的状态和事务
+
+- 原因：原生 Task、审批/报价/人工核验和 best-effort 审计原先分开提交；Coordinator 已有持久状态表和版本列，不需要新增状态表或工作流引擎。
+- 范围：按 STATE-01 契约先限定 quote-task；使用固定 `quote-task/v1` 模板标识和 `quote:<task_id>` 计划标识，实例就是原 Task ID。`procurement_coordination_states.current_plan` 保存当前企业步骤和 task_id 输入引用；不复制参数、URL 或页面正文。
+- 唯一事实：Task 保留浏览器执行事实；TaskExtension 保留租户/风险；Approval/Review/Quote 保留业务事实；coordination state 仅记录企业处理步骤。Coordinator 拒绝加载由 quote-task 拥有的快照，不产生另一套执行器。
+- 提交顺序：上下文/待审批/审计同事务；执行前 Task.running/企业 running/审计同事务；原生执行后报价或人工核验/企业步骤/审计同事务。审批决定及拒绝取消 Task、人工处置也同事务提交。原生浏览器副作用不纳入数据库事务，保留 RUN-01 的显式恢复与歧义态转人工。
+- 并发：保留 TaskExtension 独占 claim，企业快照用 task_id + organization_id + version CAS；恢复 API 可携带 expected_version，过期返回 409。只读 quote-state API 复用采购读取权限，并只返回标识、步骤和版本。
+- 历史兼容：不批量回填。无快照旧任务首次合法状态变更时建立版本 1；未发生变更的旧任务返回 state=null。复用现有 JSON/版本列，不新增迁移。
+- 保留：其他 Skill/template/Coordinator/Workflow 链的统一事务与页面自动恢复仍未完成；旧 best-effort 审计模式仅保留给未纳入本切片的调用方。

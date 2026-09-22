@@ -64,6 +64,13 @@ def _headers(role: str = "super_admin", key: str = "smoke-key") -> dict[str, str
     return {"Authorization": f"Bearer {_token(role)}", "Idempotency-Key": key}
 
 
+def test_request_idempotency_key_is_namespaced_and_hashed() -> None:
+    smoke_hash = routes._request_key_hash("smoke", "sensitive-client-key")
+    assert smoke_hash == routes._request_key_hash("smoke", "sensitive-client-key")
+    assert "sensitive-client-key" not in smoke_hash
+    assert smoke_hash != routes._request_key_hash("quote", "sensitive-client-key")
+
+
 def test_smoke_task_requires_authentication_and_procurement_role(monkeypatch) -> None:
     client = _client()
 
@@ -94,6 +101,7 @@ def test_smoke_task_is_idempotent_and_reports_execution_failure(monkeypatch) -> 
     calls = 0
     create_options = []
     notifications = []
+    persisted = {}
 
     async def create_task(**kwargs):
         nonlocal calls
@@ -110,10 +118,16 @@ def test_smoke_task_is_idempotent_and_reports_execution_failure(monkeypatch) -> 
         pass
 
     monkeypatch.setattr(routes, "_validate_smoke_context", validate_context)
+    monkeypatch.setattr(
+        routes,
+        "_persisted_request",
+        AsyncMock(side_effect=lambda _org, request_key_hash: persisted.get(request_key_hash)),
+    )
     attached = []
 
     async def attach_context(*args):
         attached.append(args)
+        persisted[args[4]] = (args[0], "apr-smoke")
         return "apr-smoke"
 
     monkeypatch.setattr(routes, "_attach_procurement_context", attach_context)
@@ -159,6 +173,7 @@ def test_smoke_task_reports_creation_failure(monkeypatch) -> None:
         raise RuntimeError("database unavailable")
 
     monkeypatch.setattr(routes, "_create_smoke_task", fail_create)
+    monkeypatch.setattr(routes, "_persisted_request", AsyncMock(return_value=None))
     async def validate_context(*_args):
         pass
 
@@ -199,14 +214,15 @@ async def test_smoke_task_persists_procurement_context(monkeypatch) -> None:
             pass
 
     monkeypatch.setattr(routes, "forge_app", SimpleNamespace(DATABASE=SimpleNamespace(Session=lambda: Session())))
-    monkeypatch.setattr(routes, "record_audit_event", audit)
+    monkeypatch.setattr(routes, "write_audit_log", audit)
     payload = routes.SmokeTaskRequest(**PAYLOAD)
     risk = await routes.detect_risk(payload.risk.to_context())
-    await routes._attach_procurement_context("task-smoke", payload, _user(), risk)
+    await routes._attach_procurement_context("task-smoke", payload, _user(), risk, "smoke:digest")
     assert (saved[0].task_id, saved[0].department_id, saved[0].category_id) == (
         "task-smoke", "dept-smoke", "cat-smoke"
     )
     assert saved[0].risk_level == "high"
+    assert saved[0].request_key_hash == "smoke:digest"
     assert saved[0].risk_result["deterministic_level"] == "high"
     assert saved[1].requester_user_id == "user-smoke"
     assert saved[1].approver_department_id == "dept-smoke"

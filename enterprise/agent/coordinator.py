@@ -100,6 +100,8 @@ class AgentCoordinator:
                 if other_org is not None:
                     raise CoordinationStateConflict("Coordination task belongs to another organization")
                 return None
+        if row.current_plan.get("template_id") == "quote-task/v1":
+            raise CoordinationStateConflict("Quote lifecycle is owned by procurement routes")
         return CoordinationState(
             task_id=row.task_id,
             org_id=row.organization_id,

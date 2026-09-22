@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 
 # The checkout omits Skyvern's unrelated workflow block module; keep this unit
 # test scoped to the procurement route without changing that existing surface.
@@ -67,6 +68,48 @@ class _Database:
 
     def Session(self):
         return _Session(self)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_review_autoflush_reuses_committed_review(monkeypatch):
+    database = _Database()
+    winner = SimpleNamespace(review_id="phr_winner", status="pending")
+
+    async def concurrent_insert(*_args, **_kwargs):
+        database.review = winner
+        raise IntegrityError("INSERT review", {}, RuntimeError("duplicate pending review"))
+
+    monkeypatch.setattr(routes, "forge_app", SimpleNamespace(DATABASE=database))
+    monkeypatch.setattr(routes, "advance_quote_state", concurrent_insert)
+    audit = AsyncMock()
+    monkeypatch.setattr(routes, "write_audit_log", audit)
+    result = await routes._create_or_get_quote_human_review(
+        "task_a", _payload(), _user(), reason_code="quote_execution_interrupted",
+        safe_error_summary="Quote execution was interrupted",
+    )
+    assert result is winner
+    audit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_planner_review_does_not_enter_quote_state_machine(monkeypatch):
+    database = _Database()
+    database.review = ProcurementHumanReviewModel(
+        review_id="phr_planner", task_id="task_a", organization_id="org_a",
+        department_id="dept_a", category_id="pc_a", status="pending",
+        reason_code="planner_replan_limit_exceeded", safe_error_summary="Replan limit reached",
+        action_index=0, action_type="planner_replan", created_by="operator_a",
+        created_at=datetime.datetime.utcnow(),
+    )
+    snapshot = AsyncMock()
+    monkeypatch.setattr(routes, "forge_app", SimpleNamespace(DATABASE=database))
+    monkeypatch.setattr(routes, "advance_quote_state", snapshot)
+    monkeypatch.setattr(routes, "write_audit_log", AsyncMock())
+    result = await routes.resolve_human_review(
+        "phr_planner", routes.HumanReviewResolutionRequest(action=ResolutionAction.SKIP_STEP), _user(),
+    )
+    assert result.status == "resolved"
+    snapshot.assert_not_awaited()
 
 
 class _Session:
@@ -132,7 +175,7 @@ async def test_quote_failure_creates_one_pending_review_and_reuses_it(monkeypatc
     database = _Database()
     audit = AsyncMock()
     monkeypatch.setattr(routes, "forge_app", SimpleNamespace(DATABASE=database))
-    monkeypatch.setattr(routes, "record_audit_event", audit)
+    monkeypatch.setattr(routes, "write_audit_log", audit)
 
     with pytest.raises(HTTPException) as first:
         await routes._persist_extracted_quote(_task(), _payload(), _user())
@@ -165,7 +208,7 @@ async def test_manual_complete_validates_artifact_and_persists_quote(monkeypatch
     )
     audit = AsyncMock()
     monkeypatch.setattr(routes, "forge_app", SimpleNamespace(DATABASE=database))
-    monkeypatch.setattr(routes, "record_audit_event", audit)
+    monkeypatch.setattr(routes, "write_audit_log", audit)
 
     result = await routes.resolve_human_review(
         "phr_a",
@@ -212,7 +255,7 @@ async def test_skip_and_terminate_persist_distinct_resolution_states(monkeypatch
     )
     audit = AsyncMock()
     monkeypatch.setattr(routes, "forge_app", SimpleNamespace(DATABASE=database))
-    monkeypatch.setattr(routes, "record_audit_event", audit)
+    monkeypatch.setattr(routes, "write_audit_log", audit)
 
     skipped = await routes.resolve_human_review(
         "phr_skip",

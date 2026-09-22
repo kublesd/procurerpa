@@ -33,7 +33,8 @@ def _user() -> UserContext:
 @pytest.mark.asyncio
 async def test_extracted_quote_is_validated_before_persistence(monkeypatch) -> None:
     added = []
-    monkeypatch.setattr(routes, "record_audit_event", AsyncMock())
+    monkeypatch.setattr(routes, "advance_quote_state", AsyncMock())
+    monkeypatch.setattr(routes, "write_audit_log", AsyncMock())
 
     class Session:
         async def __aenter__(self):
@@ -44,6 +45,8 @@ async def test_extracted_quote_is_validated_before_persistence(monkeypatch) -> N
 
         async def scalar(self, statement):
             sql = str(statement)
+            if "supplier_quotes" in sql:
+                return None
             if "task_extensions" in sql:
                 return SimpleNamespace(task_id="task_a")
             return "artifact_a"
@@ -99,6 +102,7 @@ async def test_quote_task_uses_native_extraction_request(monkeypatch) -> None:
     created_requests = []
 
     async def create_task(**kwargs):
+        assert kwargs["defer_execution"] is True
         created_requests.append(kwargs["task_request"])
         return SimpleNamespace(task_id="task_a", status=TaskStatus.created)
 
@@ -117,16 +121,18 @@ async def test_quote_task_uses_native_extraction_request(monkeypatch) -> None:
     monkeypatch.setattr(routes.settings, "ENV", "local")
     monkeypatch.setattr(routes, "_allowed_smoke_urls", lambda: {payload.url})
     monkeypatch.setattr(routes, "_validate_smoke_context", validate)
+    monkeypatch.setattr(routes, "_persisted_request", AsyncMock(return_value=None))
     monkeypatch.setattr(routes, "_create_smoke_task", create_task)
     monkeypatch.setattr(routes, "_attach_procurement_context", attach)
     monkeypatch.setattr(routes, "_get_smoke_task", get_task)
     monkeypatch.setattr(routes, "_persist_extracted_quote", persist)
-    routes._QUOTE_TASKS.clear()
-
+    recovered = AsyncMock(return_value=SimpleNamespace(quote_id="sq_a", artifact_id="artifact_a"))
+    monkeypatch.setattr(routes, "recover_quote_task", recovered)
     request = Request({"type": "http", "method": "POST", "path": "/quote-task", "headers": []})
     result = await routes.quote_task(payload, request, Response(), BackgroundTasks(), "key-a", user)
 
     assert result.outcome == "completed"
     assert result.quote_id == "sq_a"
+    recovered.assert_awaited_once_with("task_a", user)
     assert created_requests[0].data_extraction_goal == routes._QUOTE_EXTRACTION_GOAL
     assert created_requests[0].extracted_information_schema == routes.QUOTE_EXTRACTION_SCHEMA

@@ -45,6 +45,9 @@ def test_quote_model_uses_decimal_storage_and_scope_columns():
         "procurement_categories.category_id",
         "artifacts.artifact_id",
     }
+    assert "uq_supplier_quote_task" in {
+        constraint.name for constraint in SupplierQuoteModel.__table__.constraints
+    }
 
 
 def test_quote_comparison_is_decimal_stable_and_explains_moq_exclusion():

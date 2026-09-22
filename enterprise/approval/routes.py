@@ -6,7 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
-from enterprise.audit.logger import record_audit_event
+from enterprise.audit.logger import record_audit_event, write_audit_log
 from enterprise.audit.models import ActionType
 from enterprise.auth.dependencies import require_any_operator, require_approver
 from enterprise.auth.models import TaskExtensionModel
@@ -118,6 +118,10 @@ async def _decide(
     note: str,
     user: UserContext,
 ) -> DecisionResponse:
+    from enterprise.procurement.quote_state import advance_quote_state
+    from enterprise.procurement.routes import _QUOTE_EXTRACTION_GOAL
+    from skyvern.forge.sdk.db.models import TaskModel
+
     async with forge_app.DATABASE.Session() as session:
         approval = await _locked_approval(session, approval_id)
         if approval.organization_id != user.org_id:
@@ -139,7 +143,9 @@ async def _decide(
         if approval.status != ApprovalStatus.PENDING.value:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Approval is already {approval.status}")
 
-        task = await forge_app.DATABASE.get_task(approval.task_id, organization_id=approval.organization_id)
+        task = await session.scalar(select(TaskModel).where(
+            TaskModel.task_id == approval.task_id, TaskModel.organization_id == approval.organization_id,
+        ).with_for_update())
         if task is None or task.status != TaskStatus.created:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Procurement task is no longer awaiting approval")
 
@@ -155,29 +161,31 @@ async def _decide(
             "business_line_id": approval.business_line_id,
         }
         if decision is ApprovalStatus.REJECTED:
-            await forge_app.DATABASE.update_task(
-                approval.task_id,
-                status=TaskStatus.canceled,
-                organization_id=approval.organization_id,
+            task.status = TaskStatus.canceled
+        if getattr(task, "data_extraction_goal", None) == _QUOTE_EXTRACTION_GOAL:
+            await advance_quote_state(
+                session, task_id=approval.task_id, org_id=approval.organization_id,
+                department_id=approval.department_id, executor=user.user_id,
+                step="ready" if decision is ApprovalStatus.APPROVED else "rejected",
             )
+        await write_audit_log(session, commit=False,
+            **audit_context,
+            business_object_type="approval",
+            business_object_id=approval_id,
+            action_index=4,
+            action_type=(
+                ActionType.APPROVAL_APPROVED.value
+                if decision is ApprovalStatus.APPROVED
+                else ActionType.APPROVAL_REJECTED.value
+            ),
+            executor=user.user_id,
+            input_value={"decision_note": note},
+            execution_result=decision.value,
+            has_approval=True,
+            approval_id=approval_id,
+            approver_user_id=user.user_id,
+        )
         await session.commit()
-    await record_audit_event(
-        **audit_context,
-        business_object_type="approval",
-        business_object_id=approval_id,
-        action_index=4,
-        action_type=(
-            ActionType.APPROVAL_APPROVED.value
-            if decision is ApprovalStatus.APPROVED
-            else ActionType.APPROVAL_REJECTED.value
-        ),
-        executor=user.user_id,
-        input_value={"decision_note": note},
-        execution_result=decision.value,
-        has_approval=True,
-        approval_id=approval_id,
-        approver_user_id=user.user_id,
-    )
     return DecisionResponse(
         approval_id=approval_id,
         status=decision.value,
@@ -210,6 +218,8 @@ async def continue_request(
     background_tasks: BackgroundTasks,
     user: UserContext = Depends(require_any_operator),
 ):
+    from enterprise.procurement.routes import quote_continuation_payload, recover_quote_task
+
     async with forge_app.DATABASE.Session() as session:
         approval = await _locked_approval(session, approval_id)
         if approval.organization_id != user.org_id:
@@ -230,16 +240,31 @@ async def continue_request(
         task = await forge_app.DATABASE.get_task(
             approval_data["task_id"], organization_id=approval_data["organization_id"],
         )
-        if task is None or task.status != TaskStatus.created:
+        if task is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Procurement task is unavailable")
+        quote_payload = await quote_continuation_payload(task, user)
+        if task.status != TaskStatus.created and quote_payload is None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Procurement task has already continued")
-        # Claim the task while the approval row is locked so concurrent retries
-        # cannot schedule the same native Task twice.
-        await forge_app.DATABASE.update_task(
-            approval_data["task_id"],
-            status=TaskStatus.running,
-            organization_id=approval_data["organization_id"],
-        )
+        if quote_payload is None:
+            # Claim the task while the approval row is locked so concurrent retries
+            # cannot schedule the same native Task twice.
+            await forge_app.DATABASE.update_task(
+                approval_data["task_id"],
+                status=TaskStatus.running,
+                organization_id=approval_data["organization_id"],
+            )
         browser_session_id = task.browser_session_id
+
+    if quote_payload is not None:
+        await recover_quote_task(approval_data["task_id"], user)
+        task = await forge_app.DATABASE.get_task(
+            approval_data["task_id"], organization_id=approval_data["organization_id"],
+        )
+        return ContinueResponse(
+            approval_id=approval_data["approval_id"],
+            task_id=approval_data["task_id"],
+            task_status=task.status.value,
+        )
 
     try:
         await AsyncExecutorFactory.get_executor().execute_task(

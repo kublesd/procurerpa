@@ -1,4 +1,4 @@
-"""Best-effort database audit writer."""
+"""Database audit writer with explicit caller-owned or best-effort transactions."""
 
 import json
 import logging
@@ -45,8 +45,9 @@ async def write_audit_log(
     has_approval: bool = False,
     approval_id: str | None = None,
     approver_user_id: str | None = None,
+    commit: bool = True,
 ) -> AuditLogModel | None:
-    """Persist one sanitized event; audit failures never break procurement."""
+    """Stage a strict transactional event, or use the legacy best-effort commit mode."""
     try:
         stored_value, raw_hash = _serialized_details(input_value)
         entry = AuditLogModel(
@@ -74,9 +75,12 @@ async def write_audit_log(
             approver_user_id=approver_user_id,
         )
         db_session.add(entry)
-        await db_session.commit()
+        if commit:
+            await db_session.commit()
         return entry
     except Exception as exc:
+        if not commit:
+            raise
         logger.warning(
             "AUDIT_LOG_FAILURE task=%s action=%d error_type=%s",
             task_id,

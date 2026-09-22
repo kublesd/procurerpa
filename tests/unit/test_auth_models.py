@@ -9,7 +9,7 @@ Tests cover:
 """
 
 import datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import inspect as sa_inspect
@@ -270,6 +270,11 @@ class TestTaskExtensionModel:
     def test_task_id_unique(self):
         col = TaskExtensionModel.__table__.c.task_id
         assert col.unique is True
+
+    def test_request_idempotency_is_persisted_per_organization(self):
+        assert TaskExtensionModel.__table__.c.request_key_hash.nullable is True
+        constraints = TaskExtensionModel.__table__.constraints
+        assert "uq_task_extension_org_request_key" in {constraint.name for constraint in constraints}
 
     def test_check_constraint_valid_risk_level(self):
         constraints = TaskExtensionModel.__table__.constraints
