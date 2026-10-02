@@ -1,4 +1,6 @@
-"""Redis Pub/Sub based approval wait mechanism.
+"""Legacy simulated approval helper, not connected to production procurement.
+
+Production uses notifications.py; Redis messages never decide production approvals.
 
 When a high-risk operation is detected, the executing coroutine creates an
 approval request and then subscribes to a Redis channel keyed by approval_id.

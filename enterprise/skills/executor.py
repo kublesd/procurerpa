@@ -110,6 +110,8 @@ def _safe_value(value: Any) -> Any:
 
 def compile_skill_pipeline(steps: list[SkillStep]) -> CompiledSkillPipeline:
     """Compile registered Skills into one native Skyvern task without credentials or URLs."""
+    if any(step.skill_name in ("login", "session_keep_alive") for step in steps):
+        raise ValueError("Skill credentials/session authentication are not_connected")
     goals: list[str] = []
     payload: dict[str, Any] = {}
     headers: list[str] = []
@@ -150,6 +152,7 @@ def compile_skill_pipeline(steps: list[SkillStep]) -> CompiledSkillPipeline:
                 "required": headers,
             })
         schema = {
+            "x-skyvern-preserve-missing": True,
             "type": "object",
             "properties": {"rows": {"type": "array", "items": item_schema}},
             "required": ["rows"],

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from skyvern.schemas.steps import AgentStepOutput
 from skyvern.webeye.actions.action_types import ActionType
@@ -72,6 +72,7 @@ class Step(BaseModel):
     cached_token_count: int | None = None
     step_cost: float = 0
     created_by: str | None = None
+    procurement_model_route: dict | None = Field(default=None, exclude=True)
     is_speculative: bool = False
     speculative_original_status: StepStatus | None = None
     speculative_llm_metadata: SpeculativeLLMMetadata | None = None

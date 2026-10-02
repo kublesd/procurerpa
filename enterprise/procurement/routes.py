@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import hashlib
+import json
 import logging
 from decimal import Decimal
 from pathlib import Path
@@ -10,14 +11,17 @@ from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from redis.asyncio import Redis
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from enterprise import __version__
+from enterprise.agent.quote_planner import plan_quote
 from enterprise.approval.models import DEFAULT_TIMEOUTS, ApprovalRequestModel, generate_approval_id
+from enterprise.approval.policy import policy_snapshot, resolve_approval_route
 from enterprise.approval.risk_detector import RiskAssessment, RiskContext, detect_risk
+from enterprise.approval.risk_review import review_risk
 from enterprise.audit.logger import write_audit_log
 from enterprise.audit.models import ActionType
 from enterprise.audit.sanitizer import sanitize_input
@@ -26,6 +30,7 @@ from enterprise.auth.enums import PROCUREMENT_ROLE_MAP
 from enterprise.auth.models import DepartmentModel, TaskExtensionModel
 from enterprise.auth.schemas import UserContext
 from enterprise.llm.human_intervention import ResolutionAction
+from enterprise.llm.resilient_caller import clean_llm_response
 from enterprise.notification.dispatcher import notify_approval_created
 from enterprise.notification.templates import ApprovalNotificationContext
 from enterprise.procurement.comparison import (
@@ -42,7 +47,12 @@ from enterprise.procurement.models import (
     generate_human_review_id,
     generate_supplier_quote_id,
 )
-from enterprise.procurement.quote_state import advance_quote_state, load_quote_state, quote_state_response
+from enterprise.procurement.quote_state import (
+    advance_quote_state,
+    load_quote_state,
+    quote_state_response,
+    save_quote_plan,
+)
 from enterprise.tenant.context import tenant_context_for
 from enterprise.tenant.query_filter import apply_tenant_filter, filter_task_extensions
 from skyvern.config import is_development_environment, settings
@@ -56,6 +66,7 @@ router = APIRouter(prefix="/enterprise/procurement", tags=["enterprise-procureme
 logger = logging.getLogger(__name__)
 
 QUOTE_EXTRACTION_SCHEMA: dict[str, Any] = {
+    "x-skyvern-preserve-missing": True,
     "type": "object",
     "properties": {
         "supplier_id": {"type": "string"},
@@ -187,6 +198,8 @@ class QuoteCreateRequest(BaseModel):
 
 
 class ExtractedSupplierQuote(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
     supplier_id: str = Field(min_length=1, max_length=128)
     material_name: str = Field(min_length=1, max_length=256)
     quantity: Decimal = Field(gt=0)
@@ -197,6 +210,16 @@ class ExtractedSupplierQuote(BaseModel):
     moq: Decimal = Field(ge=0)
     delivery_days: int = Field(ge=0, le=3650)
     confidence: Decimal | None = Field(default=None, ge=0, le=1)
+
+    @field_validator("unit", mode="before")
+    @classmethod
+    def normalize_unit(cls, value: Any) -> Any:
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def normalize_currency(cls, value: Any) -> Any:
+        return value.strip().upper() if isinstance(value, str) else value
 
 
 class ManualQuoteResult(BaseModel):
@@ -392,7 +415,7 @@ async def _persist_supplier_quote(
     payload: QuoteCreateRequest,
     user: UserContext,
     *,
-    commit: bool = True,
+    commit: bool = True, native_extraction: bool = False,
 ) -> SupplierQuoteModel:
     await _validate_quote_context(session, payload, user)
     quote = SupplierQuoteModel(
@@ -420,7 +443,7 @@ async def _persist_supplier_quote(
     if task is not None and getattr(task, "data_extraction_goal", None) == _QUOTE_EXTRACTION_GOAL:
         await advance_quote_state(
             session, task_id=payload.task_id, org_id=user.org_id, department_id=payload.department_id,
-            executor=user.user_id, step="completed",
+            executor=user.user_id, step="completed", native_extraction=native_extraction,
         )
     if commit:
         await session.commit()
@@ -887,6 +910,8 @@ class HealthResponse(BaseModel):
 
 
 class ProcurementRiskInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     total_amount_cny: Decimal = Field(default=Decimal("0"), ge=0)
     supplier_id: str | None = Field(default=None, max_length=128)
     is_new_supplier: bool = False
@@ -904,6 +929,8 @@ class ProcurementRiskInput(BaseModel):
 
 
 class SmokeTaskRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     organization_id: str = Field(min_length=1, max_length=128)
     department_id: str = Field(min_length=1, max_length=128)
     category_id: str = Field(min_length=1, max_length=128)
@@ -1082,6 +1109,10 @@ async def _attach_procurement_context(
             created_by=user.user_id,
         ))
         if risk.risk_level in ("high", "critical"):
+            route = await resolve_approval_route(
+                session, org_id=user.org_id, department_id=payload.department_id,
+                category_id=payload.category_id, requester_user_id=user.user_id, risk_level=risk.risk_level,
+            )
             approval_id = generate_approval_id()
             approval = ApprovalRequestModel(
                 approval_id=approval_id,
@@ -1092,7 +1123,10 @@ async def _attach_procurement_context(
                 risk_level=risk.risk_level,
                 risk_reason=risk.reason,
                 operation_description=payload.risk.redacted_description,
-                approver_department_id=payload.department_id,
+                approver_department_id=route.approver_department_id,
+                approver_role=route.approver_role,
+                category_id=payload.category_id,
+                **policy_snapshot(payload.risk.total_amount_cny),
                 status="pending",
                 timeout_seconds=DEFAULT_TIMEOUTS[risk.risk_level],
             )
@@ -1163,7 +1197,10 @@ async def quote_continuation_payload(task: Task, user: UserContext) -> QuoteTask
     """Recover quote context from persisted facts, including after a restart."""
     if (
         getattr(task, "data_extraction_goal", None) != _QUOTE_EXTRACTION_GOAL
-        or getattr(task, "extracted_information_schema", None) != QUOTE_EXTRACTION_SCHEMA
+        or getattr(task, "extracted_information_schema", None) not in (
+            QUOTE_EXTRACTION_SCHEMA,
+            {key: value for key, value in QUOTE_EXTRACTION_SCHEMA.items() if key != "x-skyvern-preserve-missing"},
+        )
     ):
         return None
     async with forge_app.DATABASE.Session() as session:
@@ -1226,7 +1263,22 @@ async def recover_quote_task(task_id: str, user: UserContext, expected_version: 
                 "review_status": review.status, "enterprise_status": "needs_human",
             })
         task = await _get_smoke_task(task_id, user.org_id)
-        if task.status == TaskStatus.created:
+        if task.status not in (TaskStatus.created, TaskStatus.completed):
+            raise await _quote_needs_human_confirmation(
+                task_id, "Quote execution was interrupted", payload, user,
+            )
+        async with forge_app.DATABASE.Session() as session:
+            state = await load_quote_state(session, task_id, user.org_id)
+            plan = await plan_quote(
+                native_completed=task.status == TaskStatus.completed,
+                previous=state.current_plan.get("orchestration") if state is not None else None,
+            )
+            await save_quote_plan(
+                session, task_id=task_id, org_id=user.org_id, department_id=payload.department_id,
+                executor=user.user_id, plan=plan,
+            )
+            await session.commit()
+        if "execute_native" in plan["steps"]:
             # Commit native uncertainty marker, enterprise step and audit before browser side effects.
             async with forge_app.DATABASE.Session() as session:
                 native = await session.scalar(select(TaskModel).where(
@@ -1302,14 +1354,17 @@ async def _persist_extracted_quote(
     if existing is not None:
         return existing
     try:
-        extracted = ExtractedSupplierQuote.model_validate(task.extracted_information)
-    except ValidationError as exc:
+        information = task.extracted_information
+        if isinstance(information, str):
+            information = json.loads(clean_llm_response(information), parse_float=Decimal)
+        extracted = ExtractedSupplierQuote.model_validate(information)
+    except (ValidationError, json.JSONDecodeError):
         raise await _quote_needs_human_confirmation(
             task.task_id,
             "Required quote fields are missing or have invalid types",
             payload,
             user,
-        ) from exc
+        ) from None
     if extracted.confidence is not None and extracted.confidence < Decimal("0.80"):
         raise await _quote_needs_human_confirmation(
             task.task_id,
@@ -1355,7 +1410,7 @@ async def _persist_extracted_quote(
                     delivery_days=extracted.delivery_days,
                     artifact_id=artifact_id,
                 ),
-                user,
+                user, native_extraction=True,
             )
         except IntegrityError:
             await session.rollback()
@@ -1516,6 +1571,9 @@ async def smoke_task(
                 response,
                 approval_id,
             )
+        except HTTPException:
+            await _cancel_orphan_task(created_task.task_id, payload.organization_id)
+            raise
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Smoke task procurement context could not be saved") from exc
 
@@ -1582,9 +1640,10 @@ async def quote_task(
                 quote.artifact_id if quote is not None else None,
             )
 
-        risk = await detect_risk(payload.risk.to_context())
+        risk = await detect_risk(payload.risk.to_context(), review_risk, structured_only=True)
         task_request = TaskRequest(
             title="ProcureRPA Day 11 supplier quote",
+            model={"procurement_routing": "runtime-v1"},
             url=payload.url,
             navigation_goal=_QUOTE_NAVIGATION_GOAL,
             data_extraction_goal=_QUOTE_EXTRACTION_GOAL,
@@ -1624,6 +1683,9 @@ async def quote_task(
                 quote.quote_id if quote is not None else None,
                 quote.artifact_id if quote is not None else None,
             )
+        except HTTPException:
+            await _cancel_orphan_task(created_task.task_id, payload.organization_id)
+            raise
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Quote task procurement context could not be saved") from exc
 

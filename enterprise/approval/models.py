@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
 )
@@ -73,6 +74,13 @@ class ApprovalRequestModel(Base):
     screenshot_path = Column(String, nullable=True)
 
     # Approval routing
+    category_id = Column(String, ForeignKey("procurement_categories.category_id"), nullable=True)
+    total_amount_cny = Column(Numeric(), nullable=True)
+    currency = Column(String(3), nullable=True)
+    matched_threshold_cny = Column(Numeric(), nullable=True)
+    policy_version = Column(String, nullable=True)
+    policy_effective_at = Column(DateTime(timezone=True), nullable=True)
+
     requester_user_id = Column(
         String,
         ForeignKey("enterprise_users.user_id"),

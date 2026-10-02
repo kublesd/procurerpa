@@ -1,3 +1,4 @@
+import json
 import logging
 import sys
 from pathlib import Path
@@ -117,6 +118,21 @@ def add_kv_pairs_to_msg(logger: logging.Logger, method_name: str, event_dict: Ev
     event_dict["msg"] = msg_field
 
     return event_dict
+
+
+def mask_enterprise_secrets(logger: logging.Logger, method_name: str, event_dict: EventDict) -> EventDict:
+    native = skyvern_context.current()
+    if native is None or not native.workflow_run_id:
+        return event_dict
+    from enterprise.workflows.runtime import current_native_context
+    context = current_native_context()
+    if context is None:
+        return event_dict
+    # Run after exception rendering, before console/context/Artifact log retention.
+    try:
+        return context.mask_secrets_in_data(json.loads(json.dumps(event_dict, default=str, ensure_ascii=False)))
+    except (TypeError, ValueError):
+        return {"event": "Enterprise log serialization omitted"}
 
 
 def skyvern_logs_processor(logger: logging.Logger, method_name: str, event_dict: EventDict) -> EventDict:
@@ -358,6 +374,7 @@ def setup_logger() -> None:
             _add_entrypoint,
             add_error_processor,
             structlog.processors.format_exc_info,
+            mask_enterprise_secrets,
         ]
         + additional_processors
         + [skyvern_logs_processor, structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
@@ -371,6 +388,7 @@ def setup_logger() -> None:
                 structlog.stdlib.ProcessorFormatter.remove_processors_meta,
                 structlog.processors.TimeStamper(fmt="iso"),
                 structlog.processors.format_exc_info,
+                mask_enterprise_secrets,
                 renderer,
             ]
         )

@@ -1,14 +1,15 @@
 """Database-backed single-level procurement approval routes."""
 
 import datetime
+from decimal import Decimal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from enterprise.audit.logger import record_audit_event, write_audit_log
 from enterprise.audit.models import ActionType
-from enterprise.auth.dependencies import require_any_operator, require_approver
+from enterprise.auth.dependencies import get_current_user, require_any_operator, require_approver
 from enterprise.auth.models import TaskExtensionModel
 from enterprise.auth.schemas import UserContext
 from skyvern.forge import app as forge_app
@@ -16,6 +17,7 @@ from skyvern.forge.sdk.executor.factory import AsyncExecutorFactory
 from skyvern.forge.sdk.schemas.tasks import TaskStatus
 
 from .models import ApprovalRequestModel, ApprovalStatus
+from .notifications import publish_update, wait_for_update
 
 router = APIRouter(prefix="/enterprise/approvals", tags=["approvals"])
 
@@ -37,9 +39,17 @@ class ApprovalResponseSchema(BaseModel):
     status: str
     requested_at: datetime.datetime
     timeout_seconds: int
+    category_id: str | None = None
+    total_amount_cny: Decimal | None = None
+    currency: str | None = None
+    matched_threshold_cny: Decimal | None = None
+    policy_version: str | None = None
+    policy_effective_at: datetime.datetime | None = None
 
 
 class DecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     note: str = Field(default="", max_length=2000)
 
 
@@ -61,9 +71,14 @@ def _user_can_approve(
     approval: ApprovalRequestModel,
     category_id: str | None = None,
 ) -> bool:
-    category_id = category_id or getattr(approval, "category_id", None)
+    category_id = getattr(approval, "category_id", None) or category_id
     if approval.organization_id != user.org_id or approval.requester_user_id == user.user_id:
         return False
+    if getattr(approval, "policy_version", None):
+        return (
+            category_id is not None and user.has_procurement_category(category_id)
+            and user.get_role_in_department(approval.approver_department_id) == approval.approver_role
+        )
     if user.is_org_admin or user.has_cross_org_approve:
         return True
     if category_id is not None and not user.has_procurement_category(category_id):
@@ -89,25 +104,27 @@ async def list_pending_approvals(user: UserContext = Depends(require_approver)):
         ApprovalRequestModel.status == ApprovalStatus.PENDING.value,
         ApprovalRequestModel.requester_user_id != user.user_id,
     )
-    if not (user.is_org_admin or user.has_cross_org_approve):
-        departments = [
-            role.department_id
-            for role in user.department_roles
-            if role.role == "approver"
-        ]
-        statement = statement.where(ApprovalRequestModel.approver_department_id.in_(departments))
-        if user.procurement_category_ids:
-            statement = statement.where(
-                select(TaskExtensionModel.task_id)
-                .where(
-                    TaskExtensionModel.task_id == ApprovalRequestModel.task_id,
-                    TaskExtensionModel.organization_id == user.org_id,
-                    TaskExtensionModel.category_id.in_(user.procurement_category_ids),
-                )
-                .exists()
-            )
-        else:
-            statement = statement.where(False)
+    departments = [
+        role.department_id for role in user.department_roles if role.role == "approver"
+    ]
+    legacy_category = (
+        select(TaskExtensionModel.task_id)
+        .where(
+            TaskExtensionModel.task_id == ApprovalRequestModel.task_id,
+            TaskExtensionModel.organization_id == user.org_id,
+            TaskExtensionModel.category_id.in_(user.procurement_category_ids),
+        )
+        .exists()
+    )
+    scoped = and_(
+        ApprovalRequestModel.approver_department_id.in_(departments),
+        or_(ApprovalRequestModel.category_id.in_(user.procurement_category_ids),
+            and_(ApprovalRequestModel.category_id.is_(None), legacy_category)),
+    )
+    if user.is_org_admin or user.has_cross_org_approve:
+        statement = statement.where(or_(ApprovalRequestModel.policy_version.is_(None), scoped))
+    else:
+        statement = statement.where(scoped)
     async with forge_app.DATABASE.Session() as session:
         return (await session.scalars(statement.order_by(ApprovalRequestModel.requested_at))).all()
 
@@ -128,8 +145,8 @@ async def _decide(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-organization approval is forbidden")
         if approval.requester_user_id == user.user_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Requesters cannot approve their own task")
-        # ponytail: category scope is read from TaskExtension until approval routing gets its own persisted category column.
-        category_id = await session.scalar(
+        # Legacy approvals have no snapshot; retain their TaskExtension category scope.
+        category_id = getattr(approval, "category_id", None) or await session.scalar(
             select(TaskExtensionModel.category_id).where(
                 TaskExtensionModel.task_id == approval.task_id,
                 TaskExtensionModel.organization_id == approval.organization_id,
@@ -186,12 +203,54 @@ async def _decide(
             approver_user_id=user.user_id,
         )
         await session.commit()
+    await publish_update(user.org_id, approval_id, decision.value, user.user_id)
     return DecisionResponse(
         approval_id=approval_id,
         status=decision.value,
         decided_at=now,
         message="Approval granted" if decision is ApprovalStatus.APPROVED else "Approval rejected",
     )
+
+
+async def _visible_approval(approval_id: str, user: UserContext) -> ApprovalResponseSchema:
+    async with forge_app.DATABASE.Session() as session:
+        approval = await session.scalar(select(ApprovalRequestModel).where(
+            ApprovalRequestModel.approval_id == approval_id,
+            ApprovalRequestModel.organization_id == user.org_id,
+        ))
+        if approval is None or approval.organization_id != user.org_id:
+            raise HTTPException(404, "Approval request not found")
+        category_id = approval.category_id or await session.scalar(select(TaskExtensionModel.category_id).where(
+            TaskExtensionModel.task_id == approval.task_id,
+            TaskExtensionModel.organization_id == user.org_id,
+        ))
+        if approval.requester_user_id != user.user_id and not _user_can_approve(user, approval, category_id):
+            raise HTTPException(403, "Approval is outside the user's scope")
+        return ApprovalResponseSchema.model_validate(approval)
+
+
+@router.get("/{approval_id}", response_model=ApprovalResponseSchema)
+async def get_approval(approval_id: str, user: UserContext = Depends(get_current_user)):
+    return await _visible_approval(approval_id, user)
+
+
+@router.get("/{approval_id}/updates", response_model=ApprovalResponseSchema)
+async def approval_updates(
+    approval_id: str,
+    timeout: int = Query(default=20, ge=1, le=25),
+    user: UserContext = Depends(get_current_user),
+):
+    current = await _visible_approval(approval_id, user)
+    if current.status == ApprovalStatus.PENDING.value:
+        await wait_for_update(user.org_id, approval_id, timeout)
+        # A fresh session observes commits even if the event was lost or fabricated.
+        from enterprise.auth.dependencies import _load_current_user
+
+        refreshed_user = await _load_current_user(user.user_id)
+        if refreshed_user is None:
+            raise HTTPException(401, "User is inactive or no longer exists")
+        return await _visible_approval(approval_id, refreshed_user)
+    return current
 
 
 @router.post("/{approval_id}/approve", response_model=DecisionResponse)

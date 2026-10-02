@@ -1111,13 +1111,21 @@ async def handle_input_text_action(
     # before filling text, we need to validate if the element can be filled if it's not one of COMMON_INPUT_TAGS
     tag_name = scraped_page.id_to_element_dict[action.element_id]["tagName"].lower()
 
+    workflow_context = None
     # Check if this is multi-field TOTP first - if so, skip secret resolution
     if action.totp_timing_info and action.totp_timing_info.get("is_totp_sequence"):
         # For multi-field TOTP, we'll set text directly in the TOTP logic below
         text: str = ""
     else:
         # For regular inputs, resolve secrets
-        text_result = get_actual_value_of_parameter_if_secret_with_task(task, action.text)
+        if task.workflow_run_id:
+            workflow_context = app.WORKFLOW_CONTEXT_MANAGER.get_workflow_run_context(task.workflow_run_id)
+            if workflow_context.get_original_secret_value_or_none(action.text) is not None:
+                from enterprise.workflows.runtime import check_secret_input
+                await check_secret_input(
+                    workflow_context, page.url, frame_url=getattr(skyvern_element.get_frame(), "url", None)
+                )
+        text_result = get_actual_value_of_parameter_if_secret_with_task(task, action.text, allow_credential_input=True)
         if text_result is None:
             return [ActionFailure(FailedToFetchSecret())]
         text = text_result
@@ -1126,6 +1134,13 @@ async def handle_input_text_action(
         text == BitwardenConstants.TOTP or text == OnePasswordConstants.TOTP or text == AzureVaultConstants.TOTP
     )
     is_secret_value = text != action.text
+    if is_secret_value and workflow_context is not None and workflow_context.workflow is not None and workflow_context.workflow.description == "enterprise-skill/v1":
+        # Native fill only: credentials cannot enter select/autocomplete/model paths.
+        try:
+            await skyvern_element.input_fill(text=text)
+        except Exception:
+            return [ActionFailure(FailedToFetchSecret())]
+        return [ActionSuccess()]
 
     # dynamically validate the attr, since it could change into enabled after the previous actions
     if await skyvern_element.is_disabled(dynamic=True):
@@ -2403,7 +2418,7 @@ def get_actual_value_of_parameter_if_secret(workflow_run_id: str, parameter: str
     return secret_value if secret_value is not None else parameter
 
 
-def get_actual_value_of_parameter_if_secret_with_task(task: Task, parameter: str) -> Any:
+def get_actual_value_of_parameter_if_secret_with_task(task: Task, parameter: str, *, allow_credential_input: bool = False) -> Any:
     """
     Get the actual value of a parameter if it's a secret. If it's not a secret, return the parameter value as is.
 
@@ -2414,6 +2429,10 @@ def get_actual_value_of_parameter_if_secret_with_task(task: Task, parameter: str
     if task.workflow_run_id is None:
         return parameter
 
+    context = app.WORKFLOW_CONTEXT_MANAGER.get_workflow_run_context(task.workflow_run_id)
+    if context.workflow is not None and context.workflow.description == "enterprise-skill/v1" and not allow_credential_input:
+        if context.get_original_secret_value_or_none(parameter) is not None:
+            raise ValueError("Enterprise credentials are restricted to controlled text input")
     return get_actual_value_of_parameter_if_secret(task.workflow_run_id, parameter)
 
 

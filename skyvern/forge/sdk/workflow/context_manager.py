@@ -1,4 +1,6 @@
 import copy
+import html
+import json
 from typing import TYPE_CHECKING, Any, Self
 
 import structlog
@@ -229,6 +231,8 @@ class WorkflowRunContext:
         Check if secrets should be included in template formatting based on experimentation provider.
         This check is done once per workflow run context to avoid repeated calls.
         """
+        if self.workflow is not None and self.workflow.description == "enterprise-skill/v1":
+            return False
         return await app.EXPERIMENTATION_PROVIDER.is_feature_enabled_cached(
             "CODE_BLOCK_ENABLED",
             self.workflow_run_id,
@@ -277,12 +281,19 @@ class WorkflowRunContext:
             return data
 
         if isinstance(data, str):
+            if self.workflow is not None and self.workflow.description == "enterprise-skill/v1":
+                secret_values |= {
+                    json.dumps(value, ensure_ascii=ascii_only)[1:-1]
+                    for value in secret_values
+                    for ascii_only in (True, False)
+                }
+                secret_values |= {html.escape(value) for value in secret_values}
             result = data
-            for secret in secret_values:
+            for secret in sorted(secret_values, key=len, reverse=True):
                 result = result.replace(secret, mask)
             return result
         elif isinstance(data, dict):
-            return {k: self.mask_secrets_in_data(v, mask) for k, v in data.items()}
+            return {self.mask_secrets_in_data(k, mask): self.mask_secrets_in_data(v, mask) for k, v in data.items()}
         elif isinstance(data, list):
             return [self.mask_secrets_in_data(item, mask) for item in data]
         return data
@@ -395,6 +406,10 @@ class WorkflowRunContext:
         parameter: Parameter,
         organization: Organization,
     ) -> None:
+        enterprise = self.workflow is not None and self.workflow.description == "enterprise-skill/v1"
+        if enterprise:
+            from enterprise.workflows.runtime import check_credential_binding
+            await check_credential_binding(self.workflow, self.workflow_run_id, organization.organization_id, credential_id)
         db_credential = await app.DATABASE.get_credential(credential_id, organization_id=organization.organization_id)
         if db_credential is None:
             raise CredentialParameterNotFoundError(credential_id)
@@ -404,8 +419,16 @@ class WorkflowRunContext:
         if credential_service is None:
             raise CredentialVaultNotConfiguredError(vault_type=vault_type.value, credential_id=credential_id)
 
-        credential_item = await credential_service.get_credential_item(db_credential)
+        if enterprise:
+            try:
+                credential_item = await credential_service.get_credential_item(db_credential)
+            except Exception:
+                raise ValueError("Native Workflow credential provider unavailable") from None
+        else:
+            credential_item = await credential_service.get_credential_item(db_credential)
         credential = credential_item.credential
+        if enterprise and (not isinstance(credential, PasswordCredential) or credential.totp or credential.totp_identifier):
+            raise ValueError("Native Workflow supports password credentials without TOTP only")
 
         credential_totp_identifier = db_credential.totp_identifier or getattr(credential, "totp_identifier", None)
         if credential_totp_identifier:

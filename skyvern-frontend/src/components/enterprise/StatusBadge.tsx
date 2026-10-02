@@ -20,6 +20,9 @@ type TaskStatus =
   | "canceled";
 
 const statusConfig: Record<string, { bg: string; text: string }> = {
+  pending:          { bg: "bg-amber-50",   text: "text-amber-700" },
+  approved:         { bg: "bg-green-50",   text: "text-green-700" },
+  rejected:         { bg: "bg-red-50",     text: "text-red-700" },
   running:          { bg: "bg-blue-50",    text: "text-blue-700" },
   completed:        { bg: "bg-green-50",   text: "text-green-700" },
   failed:           { bg: "bg-red-50",     text: "text-red-700" },
@@ -34,6 +37,9 @@ const statusConfig: Record<string, { bg: string; text: string }> = {
 };
 
 const statusLabelKeys: Record<string, string> = {
+  pending: "common.statusPendingApproval",
+  approved: "approvals.statusApproved",
+  rejected: "approvals.statusRejected",
   running: "common.statusRunning",
   completed: "common.statusCompleted",
   failed: "common.statusFailed",

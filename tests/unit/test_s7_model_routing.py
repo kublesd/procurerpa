@@ -106,7 +106,11 @@ async def test_real_step_call_records_only_safe_route_metadata():
 
 
 @pytest.mark.asyncio
-async def test_native_handler_passes_model_to_task_and_writes_safe_route_audit():
+async def test_native_handler_passes_model_to_task_and_writes_safe_route_audit(monkeypatch):
+    from skyvern.forge.sdk.api.llm.config_registry import LLMConfigRegistry
+    configure_tiers(monkeypatch)
+    monkeypatch.setattr(LLMConfigRegistry, "get_model_names", lambda: list({"LIGHT_KEY", "STANDARD_KEY", "HEAVY_KEY"}))
+    monkeypatch.setattr(type(settings), "get_model_name_to_llm_key", lambda self: MODEL_MAPPING)
     database, calls = Database(), []
     result = await make_handler(database, calls)("ignored", {})
 
@@ -174,3 +178,113 @@ async def test_real_step_model_call_audit_contains_only_safe_routing_fields():
         "step_id": "step_a",
     }
     assert writer.await_args.kwargs["duration_ms"] == 123
+
+
+def test_runtime_features_use_native_tree_without_page_text_or_values():
+    from enterprise.llm.model_router import runtime_page_features, safe_feature_summary
+    page = SimpleNamespace(element_tree=[{"tagName": "iframe", "children": [
+        {"tagName": "iframe", "children": [{"tagName": "input", "shadowHost": "synthetic", "attributes": {"value": "secret-sentinel"}, "text": "private-sentinel"}]}
+    ]}])
+    features = runtime_page_features(page)
+    assert (features.element_count, features.iframe_depth, features.form_field_count, features.has_shadow_dom) == (3, 2, 1, True)
+    summary = json.dumps(safe_feature_summary(features))
+    assert "sentinel" not in summary and "synthetic" not in summary
+    assert "not_observed" in summary
+    assert runtime_page_features(SimpleNamespace(element_tree=[])) is None
+    assert runtime_page_features(SimpleNamespace(element_tree=[{"tagName": "div", "children": "bad"}])) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow_run_id", [None, "wfr_synthetic"])
+async def test_runtime_route_precedes_prompt_and_uses_isolated_task_copy(monkeypatch, workflow_run_id):
+    from enterprise.llm.model_router import PageFeatures, resolve_model
+    configure_tiers(monkeypatch)
+    decision = resolve_model(PageFeatures(element_count=501), available_keys={"STANDARD_KEY"}, model_mapping=MODEL_MAPPING)
+    assert decision.model_tier == ModelTier.STANDARD
+    agent = ForgeAgent()
+    agent._procurement_context = AsyncMock(return_value=SimpleNamespace(department_id="dept_a"))
+    task = SimpleNamespace(task_id="task_a", organization_id="org_a", workflow_run_id=workflow_run_id,
+                           model={"procurement_routing": "runtime-v1"})
+    step = SimpleNamespace(step_id="step_a", order=0)
+    session = AsyncMock()
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=session)
+    context.__aexit__ = AsyncMock(return_value=None)
+    with patch("skyvern.forge.agent.app", SimpleNamespace(DATABASE=SimpleNamespace(Session=lambda: context))), patch(
+        "skyvern.forge.agent.resolve_model", return_value=decision
+    ), patch("skyvern.forge.agent.write_audit_log", AsyncMock()) as audit:
+        await agent._route_procurement_step(task, step, SimpleNamespace(element_tree=[{"tagName": "div"}]))
+    assert step.procurement_model_route["llm_key"] == "STANDARD_KEY"
+    assert step.procurement_model_route["feature_source"] == "native_scrape"
+    assert step.procurement_model_route["cache_policy"] == ("disabled" if workflow_run_id else "safe_actions_only")
+    assert task.model == {"procurement_routing": "runtime-v1"}
+    assert audit.await_args.kwargs["commit"] is False
+    assert audit.await_args.kwargs["business_object_id"] == "step_a"
+    session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["CLICK", "INPUT_TEXT", "UPLOAD_FILE", "KEYPRESS", "COMPLETE"])
+async def test_procurement_decisions_never_enter_action_cache(action):
+    cache = SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock())
+    agent = ForgeAgent(action_cache=cache)
+    agent._audit_procurement_model_call = AsyncMock()
+    step = SimpleNamespace(step_id="s", order=0, procurement_model_route={"llm_key": "LIGHT_KEY", "cache_policy": "safe_actions_only"})
+    task = SimpleNamespace(organization_id="org_a", task_id="t", llm_key="INITIAL_KEY", navigation_goal="synthetic")
+    page = SimpleNamespace(screenshots=[], build_element_tree=lambda _: "<div />")
+    with patch("skyvern.forge.agent.parse_actions", return_value=[object()]):
+        await agent._resolve_action_response(task=task, step=step, scraped_page=page,
+            llm_api_handler=AsyncMock(return_value={"actions": [{"action_type": action}]}), prompt="synthetic", prompt_name="extract-actions")
+    cache.set.assert_not_awaited()
+    assert cache.get.await_args.args[0] == build_cache_key("org_a", __import__("hashlib").sha256(b"<div />").hexdigest(),
+        __import__("hashlib").sha256(b"synthetic").hexdigest(), "LIGHT_KEY")
+
+
+def test_restored_native_block_keeps_enterprise_secret_template_boundary():
+    from skyvern.forge.sdk.workflow.models.block import Block
+    context = SimpleNamespace(workflow=SimpleNamespace(description="enterprise-skill/v1"), include_secrets_in_templates=False)
+    with pytest.raises(ValueError, match="secret templates"):
+        Block.format_block_parameter_template_from_workflow_run_context(
+            SimpleNamespace(), "synthetic", context, force_include_secrets=True)
+
+
+@pytest.mark.asyncio
+async def test_form_route_never_looks_up_or_writes_action_cache():
+    cache = SimpleNamespace(get=AsyncMock(), set=AsyncMock())
+    agent = ForgeAgent(action_cache=cache)
+    agent._audit_procurement_model_call = AsyncMock()
+    step = SimpleNamespace(step_id="s", order=0, procurement_model_route={"llm_key": "LIGHT_KEY", "cache_policy": "disabled"})
+    task = SimpleNamespace(organization_id="org_a", task_id="t", llm_key="LIGHT_KEY", navigation_goal="synthetic")
+    result = await agent._resolve_action_response(task=task, step=step, scraped_page=SimpleNamespace(screenshots=[]),
+        llm_api_handler=AsyncMock(return_value={"actions": [{"action_type": "WAIT"}]}), prompt="synthetic", prompt_name="extract-actions")
+    assert result["actions"][0]["action_type"] == "WAIT"
+    cache.get.assert_not_awaited()
+    cache.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_runtime_cache_reuses_only_same_registered_key_and_audits_hit():
+    from fakeredis.aioredis import FakeRedis
+
+    from enterprise.llm.action_cache import RedisActionCacheStore
+    redis = FakeRedis(decode_responses=True)
+    agent = ForgeAgent(action_cache=RedisActionCacheStore(redis))
+    agent._audit_procurement_model_call = AsyncMock()
+    step = SimpleNamespace(step_id="s", order=0, procurement_model_route={"llm_key": "LIGHT_KEY", "cache_policy": "safe_actions_only"})
+    task = SimpleNamespace(organization_id="org_a", task_id="t", llm_key="INITIAL_KEY", navigation_goal="synthetic")
+    page = SimpleNamespace(screenshots=[], build_element_tree=lambda _: "<div />")
+    llm = AsyncMock(return_value={"actions": [{"action_type": "WAIT"}]})
+    try:
+        with patch("skyvern.forge.agent.parse_actions", return_value=[object()]):
+            for _ in range(2):
+                await agent._resolve_action_response(task=task, step=step, scraped_page=page,
+                    llm_api_handler=llm, prompt="synthetic", prompt_name="extract-actions")
+            assert llm.await_count == 1
+            assert agent._audit_procurement_model_call.await_args.args[-1] == "cache_hit"
+            step.procurement_model_route["llm_key"] = "HEAVY_KEY"
+            await agent._resolve_action_response(task=task, step=step, scraped_page=page,
+                llm_api_handler=llm, prompt="synthetic", prompt_name="extract-actions")
+            assert llm.await_count == 2
+            assert (await agent.action_cache.stats("org_a"))["hits"] == 1
+    finally:
+        await redis.aclose()

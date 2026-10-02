@@ -130,6 +130,10 @@ class ArtifactManager:
         if data and path:
             raise ValueError("Both data and path cannot be provided to create an artifact.")
 
+        from enterprise.workflows.runtime import safe_artifact_data
+        allowed, data, path = safe_artifact_data(artifact_type, data, path)
+        if not allowed:
+            return ""
         context = skyvern_context.current()
         if not workflow_run_id and context:
             workflow_run_id = context.workflow_run_id
@@ -470,6 +474,16 @@ class ArtifactManager:
         if not request.artifacts:
             return []
 
+        from enterprise.workflows.runtime import safe_artifact_data
+        safe = []
+        for item in request.artifacts:
+            allowed, data, path = safe_artifact_data(item.artifact_model.artifact_type, item.data, item.path)
+            if allowed:
+                item.data, item.path = data, path
+                safe.append(item)
+        request.artifacts = safe
+        if not safe:
+            return []
         # Extract models for bulk insert
         artifact_models = [artifact_data.artifact_model for artifact_data in request.artifacts]
 
@@ -778,6 +792,10 @@ class ArtifactManager:
             return None
         artifact = await app.DATABASE.get_artifact_by_id(artifact_id, organization_id)
         if not artifact:
+            return
+        from enterprise.workflows.runtime import safe_artifact_data
+        allowed, data, _ = safe_artifact_data(artifact.artifact_type, data, None)
+        if not allowed:
             return
         # Fire and forget
         aio_task = asyncio.create_task(app.STORAGE.store_artifact(artifact, data))

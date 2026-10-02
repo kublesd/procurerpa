@@ -1,5 +1,7 @@
 """Explainable procurement-risk detection with optional redacted LLM review."""
 
+import asyncio
+import json
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Awaitable, Callable
@@ -135,7 +137,9 @@ def _evaluate(context: RiskContext) -> list[RiskFinding]:
     return findings
 
 
-async def detect_risk(context: RiskContext, llm_callable: LLMCallable | None = None) -> RiskAssessment:
+async def detect_risk(
+    context: RiskContext, llm_callable: LLMCallable | None = None, *, structured_only: bool = False,
+) -> RiskAssessment:
     """Evaluate procurement rules, then optionally escalate a hit to Stage 2."""
     findings = _evaluate(context)
     deterministic_level = max((finding.risk_level for finding in findings), key=RISK_ORDER.get, default="low")
@@ -151,7 +155,7 @@ async def detect_risk(context: RiskContext, llm_callable: LLMCallable | None = N
         matched_keywords=matched_keywords,
     )
 
-    if llm_callable is None or not context.redacted_description or not findings:
+    if llm_callable is None or (not structured_only and not context.redacted_description) or not findings:
         return assessment
 
     prompt = (
@@ -164,9 +168,27 @@ async def detect_risk(context: RiskContext, llm_callable: LLMCallable | None = N
         f"Matched procurement keywords: {', '.join(matched_keywords) or 'none'}\n"
         f"Redacted procurement description: {context.redacted_description}"
     )
+    if structured_only:
+        # Never trust the client's "redacted" label. Only server-owned categories leave this boundary.
+        prompt = (
+            'Review procurement risk categories. Return only {"risk_level":"low|medium|high|critical"}. '
+            'Never lower the deterministic level. No explanation or additional fields.\n'
+            + json.dumps({
+                "deterministic_level": deterministic_level,
+                "categories": sorted({finding.category for finding in findings}),
+            })
+        )
     try:
-        result = await llm_callable(prompt)
-        if not isinstance(result, dict) or result.get("risk_level") not in RISK_ORDER:
+        if structured_only:
+            result = await asyncio.wait_for(llm_callable(prompt), timeout=15)
+        else:
+            result = await llm_callable(prompt)
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("risk_level"), str)
+            or result["risk_level"] not in RISK_ORDER
+            or (structured_only and set(result) != {"risk_level"})
+        ):
             assessment.llm_fallback = True
             if RISK_ORDER[assessment.risk_level] < RISK_ORDER["high"]:
                 assessment.risk_level = "high"
@@ -177,7 +199,10 @@ async def detect_risk(context: RiskContext, llm_callable: LLMCallable | None = N
         assessment.stage = "llm"
         if RISK_ORDER[level] >= RISK_ORDER[deterministic_level]:
             assessment.risk_level = level
-            assessment.reason = str(llm_reason or "LLM identified additional redacted procurement risk")
+            assessment.reason = (
+                reason + "; Structured model review retained or raised the deterministic risk level"
+                if structured_only else str(llm_reason or "LLM identified additional redacted procurement risk")
+            )
         return assessment
     except Exception as exc:
         LOG.warning("procurement risk LLM review failed", error_type=type(exc).__name__)

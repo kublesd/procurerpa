@@ -45,6 +45,101 @@ type RecentTask = {
   created_at: string;
 };
 
+type CostData = {
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cached_tokens: number;
+  total_tokens: number;
+  total_cost_usd: number | null;
+  cost_status: string;
+  breakdown: {
+    model_tier: string;
+    total_steps: number;
+    total_tokens: number;
+    cost_usd: number | null;
+    cost_status: string;
+  }[];
+  action_cache: {
+    status: string;
+    hits?: number;
+    misses?: number;
+    invalid?: number;
+    hit_rate?: number;
+  };
+};
+
+function ModelCost({ data }: { data: CostData }) {
+  const { t } = useI18n();
+  const cost = (value: number | null, status: string) =>
+    status === "known" && value !== null
+      ? `$${value.toFixed(6)}`
+      : t("dashboard.costUnknown");
+  return (
+    <div className="space-y-3 text-sm">
+      {data.breakdown.length === 0 ? (
+        <EmptyState />
+      ) : (
+        <>
+          <p>
+            {t("dashboard.modelTokens")}: {data.total_tokens.toLocaleString()} (
+            {t("dashboard.inputTokens")}:{" "}
+            {data.total_input_tokens.toLocaleString()},{" "}
+            {t("dashboard.outputTokens")}:{" "}
+            {data.total_output_tokens.toLocaleString()})
+          </p>
+          <p>
+            {t("dashboard.providerCachedTokens")}:{" "}
+            {data.total_cached_tokens.toLocaleString()}
+          </p>
+          <p>
+            {t("dashboard.modelCostUsd")}:{" "}
+            {cost(data.total_cost_usd, data.cost_status)}
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left">
+              <thead>
+                <tr>
+                  <th>{t("dashboard.modelTier")}</th>
+                  <th>{t("dashboard.modelSteps")}</th>
+                  <th>{t("dashboard.modelTokens")}</th>
+                  <th>{t("dashboard.modelCostUsd")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.breakdown.map((item) => (
+                  <tr key={item.model_tier}>
+                    <td>{item.model_tier}</td>
+                    <td>{item.total_steps}</td>
+                    <td>{item.total_tokens.toLocaleString()}</td>
+                    <td>{cost(item.cost_usd, item.cost_status)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {data.action_cache.status === "available" ? (
+        <p>
+          {t("dashboard.actionCacheOrg")}: {t("dashboard.cacheHits")}{" "}
+          {data.action_cache.hits}, {t("dashboard.cacheMisses")}{" "}
+          {data.action_cache.misses}, {t("dashboard.cacheInvalid")}{" "}
+          {data.action_cache.invalid}, {t("dashboard.cacheHitRate")}{" "}
+          {data.action_cache.hit_rate}%
+        </p>
+      ) : (
+        <p>
+          {t(
+            data.action_cache.status === "restricted"
+              ? "dashboard.cacheRestricted"
+              : "dashboard.cacheUnavailable",
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
 async function fetchJson<T>(path: string): Promise<T> {
   const response = await authFetch(path);
   if (!response.ok) {
@@ -302,11 +397,23 @@ export function DashboardPage() {
   const [trend, setTrend] = useState<TrendItem[]>([]);
   const [categories, setCategories] = useState<CategoryItem[]>([]);
   const [recentTasks, setRecentTasks] = useState<RecentTask[]>([]);
+  const [cost, setCost] = useState<CostData | null>(null);
+  const [costError, setCostError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
+    fetchJson<CostData>("/api/v1/enterprise/dashboard/cost")
+      .then((nextCost) => {
+        if (active) setCost(nextCost);
+      })
+      .catch((reason: unknown) => {
+        if (active)
+          setCostError(
+            reason instanceof Error ? reason.message : t("dashboard.loadError"),
+          );
+      });
     Promise.all([
       fetchJson<OverviewData>("/api/v1/enterprise/dashboard/overview"),
       fetchJson<TrendItem[]>("/api/v1/enterprise/dashboard/trend?days=30"),
@@ -370,12 +477,28 @@ export function DashboardPage() {
         </div>
       )}
       {loading && (
-        <p className="text-sm" style={{ color: "var(--procurerpa-text-muted)" }}>
+        <p
+          className="text-sm"
+          style={{ color: "var(--procurerpa-text-muted)" }}
+        >
           {t("dashboard.loading")}
         </p>
       )}
 
       {overview && <OverviewCards data={overview} />}
+      <GlassCard hoverable={false} padding="md">
+        <h2 className="mb-4 text-sm font-semibold">
+          {t("dashboard.modelUsage")}
+        </h2>
+        <p className="mb-3 text-xs">{t("dashboard.modelCostSource")}</p>
+        {costError ? (
+          <p role="alert">{costError}</p>
+        ) : cost ? (
+          <ModelCost data={cost} />
+        ) : (
+          <p>{t("dashboard.loading")}</p>
+        )}
+      </GlassCard>
 
       <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
         <GlassCard hoverable={false} padding="md">

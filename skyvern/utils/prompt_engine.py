@@ -82,4 +82,8 @@ def load_prompt_with_elements(
                 token_count_after_dump=token_count_after_dump,
                 max_tokens=DEFAULT_MAX_TOKENS,
             )
+    from enterprise.workflows.runtime import current_native_context
+    context = current_native_context()
+    if context is not None:
+        prompt = context.mask_secrets_in_data(prompt)
     return prompt

@@ -75,7 +75,9 @@ type SupplierKey = (typeof SUPPLIER_PAGES)[number]["key"];
 type SupplierPage = (typeof SUPPLIER_PAGES)[number];
 
 type RunState = {
-  state: "idle" | "running" | "completed" | "error";
+  state: "idle" | "running" | "completed" | "error" | "awaiting_approval";
+  approvalId: string | null;
+  approvalStatus: string;
   taskStatus: string;
   taskId: string | null;
   quoteId: string | null;
@@ -94,6 +96,8 @@ const TERMINAL_TASK_STATUSES = new Set([
 function initialRuns(): Record<SupplierKey, RunState> {
   return {
     alpha: {
+      approvalId: null,
+      approvalStatus: "",
       state: "idle",
       taskStatus: "",
       taskId: null,
@@ -102,6 +106,8 @@ function initialRuns(): Record<SupplierKey, RunState> {
       message: null,
     },
     beta: {
+      approvalId: null,
+      approvalStatus: "",
       state: "idle",
       taskStatus: "",
       taskId: null,
@@ -169,6 +175,60 @@ export function ProcurementWorkbenchPage() {
   const [comparison, setComparison] = useState<Comparison | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const pendingApprovalIds = SUPPLIER_PAGES.map((page) =>
+    runs[page.key].approvalStatus === "pending"
+      ? runs[page.key].approvalId
+      : null,
+  )
+    .filter((id): id is string => id !== null)
+    .join(",");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    async function watch(approvalId: string) {
+      const path = `/api/v1/enterprise/approvals/${encodeURIComponent(approvalId)}`;
+      while (!controller.signal.aborted) {
+        try {
+          let approval: { status: string };
+          try {
+            approval = await getJson(`${path}/updates`, {
+              signal: controller.signal,
+            });
+          } catch {
+            if (controller.signal.aborted) return;
+            approval = await getJson(path, { signal: controller.signal });
+          }
+          if (controller.signal.aborted) return;
+          setRuns((current) => {
+            const next = { ...current };
+            for (const page of SUPPLIER_PAGES) {
+              if (next[page.key].approvalId === approvalId) {
+                next[page.key] = {
+                  ...next[page.key],
+                  approvalStatus: approval.status,
+                  state: ["rejected", "timeout"].includes(approval.status)
+                    ? "error"
+                    : next[page.key].state,
+                  taskStatus: approval.status,
+                  message: null,
+                };
+              }
+            }
+            return next;
+          });
+          if (approval.status !== "pending") return;
+        } catch (watchError) {
+          if (controller.signal.aborted) return;
+          setError(errorText(watchError));
+        }
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 2000));
+      }
+    }
+    for (const id of pendingApprovalIds.split(",").filter(Boolean))
+      void watch(id);
+    return () => controller.abort();
+  }, [pendingApprovalIds]);
 
   useEffect(() => {
     isMounted.current = true;
@@ -303,6 +363,15 @@ export function ProcurementWorkbenchPage() {
             artifactId: result.artifact_id,
           });
           let completed = result.outcome === "completed";
+          if (result.outcome === "pending_approval" && result.approval_id) {
+            updateRun(page.key, {
+              state: "awaiting_approval",
+              approvalId: result.approval_id,
+              approvalStatus: "pending",
+              taskStatus: "pending",
+            });
+            continue;
+          }
           if (result.outcome === "running") {
             taskStatus = (await waitForTask(result.task_id)).status;
             completed = taskStatus === "completed";
@@ -327,10 +396,54 @@ export function ProcurementWorkbenchPage() {
           throw runError;
         }
       }
-      const result = await loadComparison(taskIds);
-      if (isMounted.current) setComparison(result);
+      if (collectedQuotes.length === SUPPLIER_PAGES.length) {
+        const result = await loadComparison(taskIds);
+        if (isMounted.current) setComparison(result);
+      }
     } catch (collectionError) {
       if (isMounted.current) setError(errorText(collectionError));
+    } finally {
+      if (isMounted.current) setLoading(false);
+    }
+  }
+
+  async function continueApproved(page: SupplierPage) {
+    const run = runs[page.key];
+    if (!run.approvalId || !run.taskId || run.approvalStatus !== "approved")
+      return;
+    setLoading(true);
+    setError(null);
+    updateRun(page.key, { state: "running", message: null });
+    try {
+      await getJson(
+        `/api/v1/enterprise/approvals/${encodeURIComponent(run.approvalId)}/continue`,
+        { method: "POST" },
+      );
+      const task = await waitForTask(run.taskId);
+      const quote = await loadQuote(run.taskId);
+      if (!isMounted.current) return;
+      const collected = [
+        ...quotes.filter((item) => item.task_id !== run.taskId),
+        quote,
+      ];
+      setQuotes(collected);
+      updateRun(page.key, {
+        state: "completed",
+        taskStatus: task.status,
+        quoteId: quote.quote_id,
+        artifactId: quote.artifact_id,
+      });
+      if (collected.length === SUPPLIER_PAGES.length) {
+        const result = await loadComparison(
+          collected.map((item) => item.task_id),
+        );
+        if (isMounted.current) setComparison(result);
+      }
+    } catch (continueError) {
+      updateRun(page.key, {
+        state: "error",
+        message: errorText(continueError),
+      });
     } finally {
       if (isMounted.current) setLoading(false);
     }
@@ -469,7 +582,10 @@ export function ProcurementWorkbenchPage() {
               noContext ||
               !organizationId ||
               !departmentId ||
-              !categoryId
+              !categoryId ||
+              Object.values(runs).some(
+                (run) => run.state === "awaiting_approval",
+              )
             }
             type="submit"
           >
@@ -527,6 +643,17 @@ export function ProcurementWorkbenchPage() {
                 {run.message && (
                   <p className="mt-2 text-sm text-red-700">{run.message}</p>
                 )}
+                {run.approvalStatus === "approved" &&
+                  run.state !== "completed" && (
+                    <button
+                      className="glass-btn-primary mt-3"
+                      type="button"
+                      disabled={loading}
+                      onClick={() => void continueApproved(page)}
+                    >
+                      {t("approvals.continue")}
+                    </button>
+                  )}
               </div>
             );
           })}

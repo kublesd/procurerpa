@@ -210,6 +210,10 @@ async def test_smoke_task_persists_procurement_context(monkeypatch) -> None:
         def add(self, model):
             saved.append(model)
 
+        async def scalar(self, statement):
+            assert "enterprise_users" in str(statement)
+            return "synthetic-eligible-approver"
+
         async def commit(self):
             pass
 

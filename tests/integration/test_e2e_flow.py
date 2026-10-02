@@ -320,7 +320,8 @@ class TestPhase3ApprovalRouting:
         assert route.approver_role == "approver"
 
     def test_critical_routes_to_compliance(self):
-        route = route_approval(risk_level="critical", source_department_id=DEPARTMENTS["credit"][0])
+        route = route_approval(risk_level="critical", source_department_id=DEPARTMENTS["credit"][0],
+                               compliance_department_id="dept_compliance_demo")
         assert route.requires_approval is True
         assert route.approver_role == "approver"
 

@@ -322,6 +322,12 @@ class Block(BaseModel, abc.ABC):
         if not potential_template:
             return potential_template
 
+        enterprise_workflow = (
+            getattr(getattr(workflow_run_context, "workflow", None), "description", None) == "enterprise-skill/v1"
+        )
+        if enterprise_workflow and (force_include_secrets or workflow_run_context.include_secrets_in_templates):
+            raise ValueError("Enterprise Workflow secret templates are disabled")
+
         # Security: only allow real secret values for non-LLM blocks (HttpRequestBlock, CodeBlock)
         is_safe_block_for_secrets = self.block_type in [
             BlockType.CODE,
@@ -424,7 +430,8 @@ class Block(BaseModel, abc.ABC):
                     variables=missing_variables,
                 )
 
-        return template.render(template_data)
+        rendered = template.render(template_data)
+        return workflow_run_context.mask_secrets_in_data(rendered) if enterprise_workflow else rendered
 
     @classmethod
     def get_subclasses(cls) -> tuple[type[Block], ...]:

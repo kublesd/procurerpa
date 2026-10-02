@@ -24,6 +24,7 @@ const buildSection: NavItem[] = [
 ];
 
 const enterpriseSection: NavItem[] = [
+  { labelKey: "nav.workflows", to: "/enterprise/templates", icon: "workflow" },
   { labelKey: "nav.procurement", to: "/enterprise/procurement", icon: "task" },
   { labelKey: "nav.dashboard", to: "/enterprise/dashboard", icon: "dashboard" },
   { labelKey: "nav.approvals", to: "/enterprise/approvals", icon: "approval" },

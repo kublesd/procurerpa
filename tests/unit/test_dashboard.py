@@ -201,3 +201,61 @@ def test_dashboard_exposes_only_procurement_endpoints():
         "/enterprise/dashboard/recent-tasks",
         "/enterprise/dashboard/cost",
     }
+
+
+def test_cost_tier_uses_step_route_and_invalid_amount_is_unknown():
+    step = SimpleNamespace(input_token_count=10, output_token_count=5, cached_token_count=0, step_cost="0.25")
+    result = compute_step_costs([(step, {"model_tier": "light"}, '{"model_tier":"heavy"}')])
+    assert result["breakdown"][0]["model_tier"] == "heavy"
+    for value in ("NaN", "Infinity", "-1", "0"):
+        step.step_cost = value
+        assert compute_step_costs([(step, {})])["total_cost_usd"] is None
+
+
+def test_fixed_manifest_comparison_is_repeatable_and_does_not_invent_costs():
+    import pytest
+
+    from scripts.benchmark_model_cost import CASES, compare_costs
+    assert compare_costs() == compare_costs()
+    assert compare_costs()["savings_percent"] is None
+    records = [{"case_id": case_id, "baseline": {"cost_usd": "1", "success": True},
+                "optimized": {"cost_usd": "0.8", "success": True}} for case_id, _ in CASES]
+    assert compare_costs(records)["savings_percent"] == "20.00"
+    records[0]["optimized"]["success"] = False
+    assert compare_costs(records)["cost_status"] == "unknown"
+    records[0]["optimized"]["success"] = True
+    records[0]["optimized"]["cost_usd"] = None
+    assert compare_costs(records)["savings_percent"] is None
+    records[0]["optimized"]["cost_usd"] = "NaN"
+    with pytest.raises(ValueError):
+        compare_costs(records)
+    with pytest.raises(ValueError):
+        compare_costs(records[:-1])
+
+
+async def test_cost_api_hides_org_cache_from_operator_and_survives_redis_failure(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from enterprise.dashboard import routes
+    user = UserContext(user_id="operator", org_id="org_a", department_roles=[
+        DepartmentRole(department_id="dept_a", department_name="A", role="operator")], procurement_category_ids=["cat_a"])
+    session = AsyncMock()
+    session.execute.return_value = SimpleNamespace(all=lambda: [])
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=session)
+    context.__aexit__ = AsyncMock(return_value=None)
+    monkeypatch.setattr(routes, "forge_app", SimpleNamespace(DATABASE=SimpleNamespace(Session=lambda: context)))
+    store = SimpleNamespace(stats=AsyncMock(side_effect=ConnectionError("synthetic-failure")))
+    monkeypatch.setattr(routes, "get_persistent_cache_store", lambda: store)
+    response = await routes.get_cost_estimation(user)
+    assert response.action_cache == {"status": "restricted", "scope": "organization"}
+    store.stats.assert_not_awaited()
+    admin = user.model_copy(update={"department_roles": [DepartmentRole(department_id="dept_a", department_name="A", role="org_admin")]})
+    response = await routes.get_cost_estimation(admin)
+    assert response.action_cache == {"status": "unavailable", "scope": "organization"}
+    assert response.total_tokens == 0
+    store.stats.assert_awaited_once_with("org_a")
+    store.stats = AsyncMock(return_value={"hits": 2, "misses": 3, "hit_rate": 40, "data_source": "redis_persistent"})
+    response = await routes.get_cost_estimation(admin)
+    assert response.action_cache["status"] == "available"
+    assert response.action_cache["hits"] == 2

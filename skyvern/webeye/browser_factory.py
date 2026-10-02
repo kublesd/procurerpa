@@ -299,6 +299,12 @@ class BrowserContextFactory:
             },
             "extra_http_headers": extra_http_headers,
         }
+        from enterprise.workflows.runtime import current_native_context
+
+        if current_native_context() is not None:
+            # Disable collection itself; Artifact filtering cannot prevent local files.
+            args["record_har_path"] = None
+            args["record_video_dir"] = None
         if settings.BROWSER_LOCALE:
             args["locale"] = settings.BROWSER_LOCALE
 
@@ -343,7 +349,9 @@ class BrowserContextFactory:
             if not creator:
                 raise UnknownBrowserType(browser_type)
             browser_context, browser_artifacts, cleanup_func = await creator(playwright, **kwargs)
-            if settings.BROWSER_LOGS_ENABLED:
+            from enterprise.workflows.runtime import current_native_context
+
+            if settings.BROWSER_LOGS_ENABLED and current_native_context() is None:
                 set_browser_console_log(browser_context=browser_context, browser_artifacts=browser_artifacts)
             set_download_file_listener(browser_context=browser_context, **kwargs)
 
@@ -705,7 +713,10 @@ async def _connect_to_cdp_browser(
     contexts = browser.contexts
     browser_context = None
 
-    if parsed_headers.use_fresh_context or not contexts:
+    from enterprise.workflows.runtime import current_native_context
+
+    # An existing CDP context may already be recording; do not reuse it for credentials.
+    if parsed_headers.use_fresh_context or not contexts or current_native_context() is not None:
         LOG.info(
             "Creating new browser context",
             fresh_context_requested=parsed_headers.use_fresh_context,

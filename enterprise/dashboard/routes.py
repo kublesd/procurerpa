@@ -7,9 +7,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from enterprise.approval.models import ApprovalRequestModel
+from enterprise.audit.models import AuditLogModel
 from enterprise.auth.dependencies import require_any_operator
 from enterprise.auth.models import TaskExtensionModel
 from enterprise.auth.schemas import UserContext
+from enterprise.llm.action_cache import get_persistent_cache_store
 from enterprise.procurement.models import ProcurementCategoryModel, SupplierQuoteModel
 from enterprise.tenant.context import tenant_context_for
 from enterprise.tenant.query_filter import apply_tenant_filter, filter_task_extensions
@@ -91,6 +93,8 @@ class CostResponse(BaseModel):
     total_cost_usd: float | None
     cost_status: str
     breakdown: list[CostBreakdownItem]
+    action_cache: dict
+    cost_source: str = "native_step_reported"
 
 
 async def _load_dashboard_data(user: UserContext):
@@ -151,7 +155,17 @@ async def _load_dashboard_data(user: UserContext):
 def _step_cost_statement(user: UserContext):
     scope = tenant_context_for(user)
     return filter_task_extensions(
-        select(StepModel, TaskModel.model)
+        select(
+            StepModel, TaskModel.model,
+            select(AuditLogModel.input_value).where(
+                AuditLogModel.organization_id == StepModel.organization_id,
+                AuditLogModel.task_id == StepModel.task_id,
+                AuditLogModel.business_object_id == StepModel.step_id,
+                AuditLogModel.business_object_type == "skyvern_step",
+                AuditLogModel.action_type == "model_route",
+            ).order_by(AuditLogModel.created_at.desc(), AuditLogModel.audit_log_id.desc()).limit(1)
+            .correlate(StepModel).scalar_subquery(),
+        )
         .join(
             TaskModel,
             (TaskModel.task_id == StepModel.task_id)
@@ -204,4 +218,14 @@ async def get_cost_estimation(
     async with forge_app.DATABASE.Session() as session:
         rows = (await session.execute(_step_cost_statement(user))).all()
     result = compute_step_costs(rows)
-    return CostResponse(**result)
+    # Redis counters are organization-wide; never expose them to a restricted operator.
+    cache = {"status": "restricted", "scope": "organization"}
+    if user.is_org_admin:
+        cache = {"status": "unavailable", "scope": "organization"}
+        store = get_persistent_cache_store()
+        if store is not None:
+            try:
+                cache = {"status": "available", "scope": "organization", **await store.stats(user.org_id)}
+            except Exception:
+                pass  # PostgreSQL usage remains readable when Redis is down.
+    return CostResponse(**result, action_cache=cache)

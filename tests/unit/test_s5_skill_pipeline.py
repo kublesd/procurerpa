@@ -10,15 +10,19 @@ from enterprise.audit.models import AuditLogModel
 from enterprise.auth.models import TaskExtensionModel
 from enterprise.procurement.models import ProcurementHumanReviewModel
 from enterprise.skills.executor import SkillStep, compile_skill_pipeline
-from enterprise.workflows.templates import SUPPLIER_QUOTE_LEDGER, compile_template_pipeline
+from enterprise.workflows.templates import (
+    SUPPLIER_QUOTE_LEDGER,
+    TEMPLATE_REGISTRY,
+    build_skill_pipeline,
+    compile_template_pipeline,
+)
 from skyvern.forge.sdk.artifact.models import ArtifactType
 from skyvern.forge.sdk.schemas.tasks import TaskStatus
 
 URL = "https://supplier.example/quotes"
 PARAMETERS = {
     "supplier_portal_url": URL,
-    "username": "buyer-demo",
-    "password": "Secret123!",
+    "credential_id": "cred_demo",
     "supplier_code": "SUP-001",
     "material_code": "MAT-001",
     "start_date": "2026-01-01",
@@ -88,7 +92,10 @@ def make_handler(database, calls):
         user_id="user_a",
         url=URL,
         allowed_urls={URL},
-        compiled_pipeline=compile_template_pipeline(SUPPLIER_QUOTE_LEDGER, PARAMETERS),
+        compiled_pipeline=compile_skill_pipeline([
+            step for step in build_skill_pipeline(SUPPLIER_QUOTE_LEDGER, PARAMETERS)
+            if step.skill_name == "table_extract"
+        ]),
     )
 
 
@@ -104,35 +111,47 @@ def valid_rows():
     }
 
 
-def test_compiler_emits_safe_native_fields_for_login_form_and_extract():
-    compiled = compile_template_pipeline(SUPPLIER_QUOTE_LEDGER, PARAMETERS)
-    serialized = json.dumps(compiled.model_dump(mode="json"), ensure_ascii=False)
-
-    assert "Secret123" not in serialized
-    assert "buyer-demo" not in serialized
-    assert "https://" not in serialized
-    assert compiled.data_extraction_goal
-    assert compiled.extracted_information_schema["properties"]["rows"]["type"] == "array"
-    assert compiled.requires_download is True
-    request = compiled.to_task_request(title="Supplier quote", url=URL)
-    assert request.url == URL
-    assert request.navigation_payload["form_fields"]["供应商编码"] == "SUP-001"
+def test_login_template_cannot_compile_without_credential_connection():
+    with pytest.raises(ValueError, match="not_connected"):
+        compile_template_pipeline(SUPPLIER_QUOTE_LEDGER, PARAMETERS)
 
 
-def test_all_seven_registered_skills_compile_without_a_second_browser_runtime():
+@pytest.mark.parametrize("template", TEMPLATE_REGISTRY.values(), ids=TEMPLATE_REGISTRY.keys())
+def test_each_legacy_template_uses_same_closed_auth_contract(template):
+    values = {
+        p.name: "https://supplier.example/quote" if p.param_type.value == "url"
+        else "2026-01-01" if p.param_type.value == "date"
+        else "1" if p.param_type.value == "integer"
+        else "synthetic"
+        for p in template.parameters if p.required
+    }
+    with pytest.raises(ValueError, match="not_connected"):
+        compile_template_pipeline(template, values)
+
+
+def test_public_extraction_compiles_without_a_second_browser_runtime():
     compiled = compile_skill_pipeline([
-        SkillStep(skill_name="login", params={"url": URL, "username": "buyer", "password": "secret"}),
-        SkillStep(skill_name="form_fill", params={"field_mapping": {"物料": "MAT-001"}}),
         SkillStep(skill_name="table_extract", params={"headers": ["物料"]}),
-        SkillStep(skill_name="file_download", params={"trigger_text": "下载"}),
-        SkillStep(skill_name="search_and_select", params={"search_text": "MAT-001", "target_text": "MAT-001"}),
         SkillStep(skill_name="pagination", params={"max_pages": 2}),
-        SkillStep(skill_name="session_keep_alive", params={}),
     ])
-
-    assert "Keep the current Skyvern browser session" in compiled.navigation_goal
     assert "Traverse the requested result pages" in compiled.navigation_goal
-    assert compiled.requires_download is True
+    assert compiled.extracted_information_schema["properties"]["rows"]["type"] == "array"
+    assert "https://" not in json.dumps(compiled.model_dump(mode="json"))
+
+
+@pytest.mark.parametrize("name", ["login", "session_keep_alive"])
+def test_authentication_steps_fail_closed(name):
+    with pytest.raises(ValueError, match="not_connected"):
+        compile_skill_pipeline([SkillStep(skill_name=name, params={})])
+
+
+@pytest.fixture(autouse=True)
+def controlled_routing(monkeypatch):
+    from enterprise.agent import skyvern_handler
+    from enterprise.llm.model_router import ProcurementPageKind, route_procurement_page
+    routing = route_procurement_page(ProcurementPageKind.DYNAMIC_QUOTE_PORTAL)
+    routing.resolved_model_key = "SKILL01_TEST"
+    monkeypatch.setattr(skyvern_handler, "resolve_procurement_page", lambda _kind: routing)
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ Complexity factors:
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -164,10 +164,22 @@ def resolve_procurement_page(
     model_mapping: dict[str, dict[str, str]] | None = None,
 ) -> RoutingDecision:
     """Resolve a procurement tier to an actually configured native Skyvern model."""
+    return resolve_model(
+        route_procurement_page(page_kind).features, available_keys=available_keys, model_mapping=model_mapping,
+    )
+
+
+def resolve_model(
+    features: PageFeatures,
+    *,
+    available_keys: set[str] | None = None,
+    model_mapping: dict[str, dict[str, str]] | None = None,
+) -> RoutingDecision:
+    """Reuse the registered native keys for both static and current scrape signals."""
     from skyvern.config import settings
     from skyvern.forge.sdk.api.llm.config_registry import LLMConfigRegistry
 
-    decision = route_procurement_page(page_kind)
+    decision = route_model(features)
     tier_keys = {
         ModelTier.LIGHT: settings.PROCUREMENT_LIGHT_LLM_KEY or settings.LLM_KEY,
         ModelTier.STANDARD: settings.PROCUREMENT_STANDARD_LLM_KEY or settings.LLM_KEY,
@@ -193,6 +205,7 @@ def resolve_procurement_page(
                 if tier == decision.model_tier
                 else f"{decision.model_tier.value}_fallback_to_{tier.value}"
             )
+            decision.model_tier = tier
             decision.data_source = "skyvern_llm_config"
             decision.execution_mode = "real"
             decision.connection_status = "connected"
@@ -252,3 +265,38 @@ def route_model(features: PageFeatures) -> RoutingDecision:
     )
 
     return decision
+
+
+def runtime_page_features(scraped_page) -> PageFeatures | None:
+    """Count only structures already observed by native scrape; never read text/value/URL."""
+    tree = getattr(scraped_page, "element_tree", None)
+    if not isinstance(tree, list) or not tree:
+        return None
+    features = PageFeatures()
+    pending = [(node, 0) for node in tree]
+    while pending:
+        node, depth = pending.pop()
+        if not isinstance(node, dict) or not isinstance(node.get("tagName"), str):
+            return None
+        tag = node["tagName"].lower()
+        features.element_count += 1
+        features.form_field_count += int(tag in {"input", "select", "textarea"})
+        features.has_shadow_dom |= bool(node.get("shadowHost"))
+        if tag in {"iframe", "frame"}:
+            depth += 1
+            features.has_iframe = True
+            features.iframe_depth = max(features.iframe_depth, depth)
+        children = node.get("children", [])
+        if not isinstance(children, list):
+            return None
+        pending.extend((child, depth) for child in children)
+    return features
+
+
+def safe_feature_summary(features: PageFeatures) -> dict:
+    summary = asdict(features)
+    summary.pop("page_kind")
+    # Native scrape does not expose reliable AJAX/WebSocket lifecycle signals.
+    summary.pop("has_dynamic_content")
+    summary["dynamic_content"] = "not_observed"
+    return summary

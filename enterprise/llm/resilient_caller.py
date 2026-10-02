@@ -4,8 +4,9 @@ Layer 1 (Prompt): Forces structured JSON output via system prompt + schema
 Layer 2 (Parse):  Pydantic validation + markdown cleanup + exponential backoff retry
 Layer 3 (Task):   After max retries, marks the procurement task NEEDS_HUMAN
 
-This is an independent first-phase demo helper; it is not connected to a
-real Skyvern Task or Action.
+The caller/retry loop is demo-only and is not connected to a real Skyvern
+Task or Action. Only the pure Markdown cleaner is shared with quote ingestion;
+production retry remains owned by native Skyvern.
 """
 
 import asyncio

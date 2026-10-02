@@ -2,13 +2,14 @@
 
 The six first-stage templates cover direct materials, MRO, and services
 procurement. They create intermediate Skill steps; production requests compile
-them into native Skyvern task fields.
+them into native Skyvern Workflow blocks with credential references.
 """
 
 import json
 import re
 
 from enterprise.skills.executor import CompiledSkillPipeline, SkillStep, compile_skill_pipeline
+from enterprise.skills.native import compile_native_skills
 
 from .schemas import (
     IndustryType,
@@ -100,25 +101,18 @@ SUPPLIER_QUOTE_LEDGER = WorkflowTemplate(
             name="supplier_portal_url", label="供应商门户地址", param_type=ParamType.URL,
             description="受控供应商门户登录地址",
         ),
-        ParamDefinition(name="username", label="门户用户名", param_type=ParamType.STRING),
-        ParamDefinition(
-            name="password", label="门户密码", param_type=ParamType.PASSWORD,
-            sensitive=True,
-        ),
+        ParamDefinition(name="credential_id", label="组织内凭据引用", param_type=ParamType.STRING,
+                        sensitive=True, description="原生 password 凭据 ID；不接收用户名或密码"),
         ParamDefinition(name="supplier_code", label="供应商编码", param_type=ParamType.STRING),
         ParamDefinition(name="material_code", label="物料编码", param_type=ParamType.STRING),
         ParamDefinition(name="start_date", label="开始日期", param_type=ParamType.DATE),
         ParamDefinition(name="end_date", label="结束日期", param_type=ParamType.DATE),
-        ParamDefinition(
-            name="download_path", label="报价附件目录", param_type=ParamType.STRING,
-            required=False, default="./downloads/quotes/",
-        ),
     ],
     tags=["供应商报价", "直接物料", "台账采集"],
     skill_steps=[
         SkillStepDefinition(
             skill_name="login", description="登录供应商门户",
-            param_mapping={"url": "supplier_portal_url", "username": "username", "password": "password"},
+            param_mapping={"url": "supplier_portal_url", "credential_id": "credential_id"},
         ),
         SkillStepDefinition(
             skill_name="form_fill", description="填写历史报价查询条件",
@@ -138,7 +132,7 @@ SUPPLIER_QUOTE_LEDGER = WorkflowTemplate(
         ),
         SkillStepDefinition(
             skill_name="file_download", description="下载报价附件",
-            param_mapping={"download_path": "download_path", "trigger_text": "=导出报价"},
+            param_mapping={"trigger_text": "=导出报价"},
         ),
     ],
 )
@@ -158,27 +152,20 @@ MATERIAL_BENCHMARK_COLLECTION = WorkflowTemplate(
     approval_rule="low 风险，无需审批",
     parameters=[
         ParamDefinition(name="pricing_portal_url", label="价格平台地址", param_type=ParamType.URL),
-        ParamDefinition(name="username", label="门户用户名", param_type=ParamType.STRING),
-        ParamDefinition(
-            name="password", label="门户密码", param_type=ParamType.PASSWORD,
-            sensitive=True,
-        ),
+        ParamDefinition(name="credential_id", label="组织内凭据引用", param_type=ParamType.STRING,
+                        sensitive=True, description="原生 password 凭据 ID；不接收用户名或密码"),
         ParamDefinition(
             name="material_codes", label="物料编码列表", param_type=ParamType.STRING,
             description="多个物料编码以逗号分隔",
         ),
         ParamDefinition(name="start_date", label="开始日期", param_type=ParamType.DATE),
         ParamDefinition(name="end_date", label="结束日期", param_type=ParamType.DATE),
-        ParamDefinition(
-            name="output_path", label="输出目录", param_type=ParamType.STRING,
-            required=False, default="./downloads/benchmarks/",
-        ),
     ],
     tags=["基准价", "直接物料", "价格采集"],
     skill_steps=[
         SkillStepDefinition(
             skill_name="login", description="登录采购价格平台",
-            param_mapping={"url": "pricing_portal_url", "username": "username", "password": "password"},
+            param_mapping={"url": "pricing_portal_url", "credential_id": "credential_id"},
         ),
         SkillStepDefinition(
             skill_name="form_fill", description="填写物料和日期条件",
@@ -218,11 +205,8 @@ PURCHASE_ORDER_DUE = WorkflowTemplate(
     approval_rule="low 风险，无需审批",
     parameters=[
         ParamDefinition(name="purchase_portal_url", label="采购平台地址", param_type=ParamType.URL),
-        ParamDefinition(name="username", label="门户用户名", param_type=ParamType.STRING),
-        ParamDefinition(
-            name="password", label="门户密码", param_type=ParamType.PASSWORD,
-            sensitive=True,
-        ),
+        ParamDefinition(name="credential_id", label="组织内凭据引用", param_type=ParamType.STRING,
+                        sensitive=True, description="原生 password 凭据 ID；不接收用户名或密码"),
         ParamDefinition(
             name="days_ahead", label="提前天数", param_type=ParamType.INTEGER,
             default="7", description="查询未来 N 天内到期的订单",
@@ -236,7 +220,7 @@ PURCHASE_ORDER_DUE = WorkflowTemplate(
     skill_steps=[
         SkillStepDefinition(
             skill_name="login", description="登录采购平台",
-            param_mapping={"url": "purchase_portal_url", "username": "username", "password": "password"},
+            param_mapping={"url": "purchase_portal_url", "credential_id": "credential_id"},
         ),
         SkillStepDefinition(
             skill_name="form_fill", description="填写交付跟踪条件",
@@ -266,22 +250,15 @@ SUPPLIER_ATTACHMENT_ARCHIVE = WorkflowTemplate(
     approval_rule="medium 风险，仅下载和归档，不改变供应商主数据",
     parameters=[
         ParamDefinition(name="supplier_portal_url", label="供应商门户地址", param_type=ParamType.URL),
-        ParamDefinition(name="username", label="门户用户名", param_type=ParamType.STRING),
-        ParamDefinition(
-            name="password", label="门户密码", param_type=ParamType.PASSWORD,
-            sensitive=True,
-        ),
+        ParamDefinition(name="credential_id", label="组织内凭据引用", param_type=ParamType.STRING,
+                        sensitive=True, description="原生 password 凭据 ID；不接收用户名或密码"),
         ParamDefinition(name="supplier_keyword", label="供应商关键词", param_type=ParamType.STRING),
-        ParamDefinition(
-            name="archive_path", label="归档目录", param_type=ParamType.STRING,
-            required=False, default="./downloads/supplier-attachments/",
-        ),
     ],
     tags=["供应商资质", "MRO", "附件归档"],
     skill_steps=[
         SkillStepDefinition(
             skill_name="login", description="登录供应商门户",
-            param_mapping={"url": "supplier_portal_url", "username": "username", "password": "password"},
+            param_mapping={"url": "supplier_portal_url", "credential_id": "credential_id"},
         ),
         SkillStepDefinition(
             skill_name="search_and_select", description="检索供应商附件",
@@ -293,7 +270,7 @@ SUPPLIER_ATTACHMENT_ARCHIVE = WorkflowTemplate(
         ),
         SkillStepDefinition(
             skill_name="file_download", description="下载附件并归档",
-            param_mapping={"download_path": "archive_path", "trigger_text": "=下载附件"},
+            param_mapping={"trigger_text": "=下载附件"},
         ),
     ],
 )
@@ -317,11 +294,8 @@ RFQ_STATUS_QUERY = WorkflowTemplate(
     approval_rule="low 风险，无需审批",
     parameters=[
         ParamDefinition(name="procurement_portal_url", label="采购平台地址", param_type=ParamType.URL),
-        ParamDefinition(name="username", label="门户用户名", param_type=ParamType.STRING),
-        ParamDefinition(
-            name="password", label="门户密码", param_type=ParamType.PASSWORD,
-            sensitive=True,
-        ),
+        ParamDefinition(name="credential_id", label="组织内凭据引用", param_type=ParamType.STRING,
+                        sensitive=True, description="原生 password 凭据 ID；不接收用户名或密码"),
         ParamDefinition(
             name="request_ids", label="询价单/任务编号", param_type=ParamType.STRING,
             description="多个编号以逗号分隔",
@@ -335,7 +309,7 @@ RFQ_STATUS_QUERY = WorkflowTemplate(
     skill_steps=[
         SkillStepDefinition(
             skill_name="login", description="登录采购平台",
-            param_mapping={"url": "procurement_portal_url", "username": "username", "password": "password"},
+            param_mapping={"url": "procurement_portal_url", "credential_id": "credential_id"},
         ),
         SkillStepDefinition(
             skill_name="search_and_select", description="检索询价单或采购任务",
@@ -363,11 +337,8 @@ SUPPLIER_CONTRACT_RENEWAL = WorkflowTemplate(
     approval_rule="medium 风险，仅生成核查清单，不自动续签合同",
     parameters=[
         ParamDefinition(name="contract_portal_url", label="合同平台地址", param_type=ParamType.URL),
-        ParamDefinition(name="username", label="门户用户名", param_type=ParamType.STRING),
-        ParamDefinition(
-            name="password", label="门户密码", param_type=ParamType.PASSWORD,
-            sensitive=True,
-        ),
+        ParamDefinition(name="credential_id", label="组织内凭据引用", param_type=ParamType.STRING,
+                        sensitive=True, description="原生 password 凭据 ID；不接收用户名或密码"),
         ParamDefinition(
             name="days_ahead", label="到期天数", param_type=ParamType.INTEGER,
             default="90", description="查询未来 N 天内到期的合同",
@@ -381,7 +352,7 @@ SUPPLIER_CONTRACT_RENEWAL = WorkflowTemplate(
     skill_steps=[
         SkillStepDefinition(
             skill_name="login", description="登录合同管理平台",
-            param_mapping={"url": "contract_portal_url", "username": "username", "password": "password"},
+            param_mapping={"url": "contract_portal_url", "credential_id": "credential_id"},
         ),
         SkillStepDefinition(
             skill_name="form_fill", description="填写合同到期条件",
@@ -419,3 +390,9 @@ def get_templates_by_industry(industry: str) -> list[WorkflowTemplate]:
 def get_template(template_id: str) -> WorkflowTemplate | None:
     """Get a procurement template by ID."""
     return TEMPLATE_REGISTRY.get(template_id)
+
+
+def compile_native_template(template: WorkflowTemplate, parameters: dict[str, str]):
+    steps = build_skill_pipeline(template, parameters)
+    url = next(parameters[p.name] for p in template.parameters if p.param_type == ParamType.URL)
+    return compile_native_skills(steps, title=template.name, url=url, credential_id=parameters["credential_id"])

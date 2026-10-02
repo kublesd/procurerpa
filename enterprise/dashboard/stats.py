@@ -1,5 +1,6 @@
 """Deterministic procurement dashboard aggregations."""
 
+import json
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -199,7 +200,14 @@ def compute_cost_estimation(model_calls, org_id: str) -> dict:
 def compute_step_costs(step_rows) -> dict:
     """Aggregate persisted Skyvern Step usage without inventing missing costs."""
     tiers: dict[str, dict] = {}
-    for step, task_model in step_rows:
+    for row in step_rows:
+        step, task_model = row[:2]
+        if len(row) > 2 and row[2]:
+            try:
+                route = json.loads(row[2])
+                task_model = route if isinstance(route, dict) else {}
+            except (TypeError, ValueError):
+                task_model = {}  # Malformed Step attribution must not fall back to the initial Task tier.
         raw_tier = task_model.get("model_tier") if isinstance(task_model, dict) else None
         tier = raw_tier if raw_tier in {"light", "standard", "heavy"} else "unassigned"
         stats = tiers.setdefault(
@@ -213,10 +221,11 @@ def compute_step_costs(step_rows) -> dict:
         stats["input"] += input_tokens
         stats["output"] += output_tokens
         stats["cached"] += cached_tokens
-        if step.step_cost is None or (Decimal(str(step.step_cost)) == 0 and input_tokens + output_tokens > 0):
+        cost = Decimal(str(step.step_cost)) if step.step_cost is not None else None
+        if cost is None or not cost.is_finite() or cost < 0 or cost == 0:
             stats["unknown"] = True
         else:
-            stats["cost"] += Decimal(str(step.step_cost or 0))
+            stats["cost"] += cost
 
     breakdown = []
     total_input = total_output = total_cached = 0

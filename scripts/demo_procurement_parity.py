@@ -86,6 +86,7 @@ def _run_risk_and_approval() -> dict:
         risk_level,
         department_id,
         procurement_category_id=category_id,
+        compliance_department_id="dept_compliance_demo",
     )
     approver = UserContext(
         user_id="procurement_approver_demo",

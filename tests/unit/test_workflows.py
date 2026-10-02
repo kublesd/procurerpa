@@ -9,15 +9,12 @@ Covers:
 """
 
 import unittest
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from enterprise.auth.models import TaskExtensionModel
-from enterprise.procurement.models import ProcurementCoordinationStateModel
 from enterprise.workflows.crypto import (
     decrypt_value,
     encrypt_value,
@@ -35,56 +32,6 @@ from enterprise.workflows.templates import (
 from enterprise.workflows.validator import (
     validate_parameters,
 )
-from skyvern.forge.sdk.schemas.tasks import TaskStatus
-
-
-class _WorkflowSession:
-    def __init__(self, database):
-        self.database = database
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_args):
-        return None
-
-    async def scalar(self, statement):
-        params = statement.compile().params
-        if params.get("department_id_1") == "dept_a" and params.get("organization_id_1") == "org_1":
-            return "dept_a"
-        if params.get("category_id_1") == "cat_a" and params.get("organization_id_1") == "org_1":
-            return "cat_a"
-        return None
-
-    def add_all(self, rows):
-        self.database.rows.extend(rows)
-
-    async def commit(self):
-        if self.database.fail_commit:
-            raise RuntimeError("database unavailable")
-        return None
-
-
-class _WorkflowDatabase:
-    def __init__(self):
-        self.rows = []
-        self.fail_commit = False
-        self.task = SimpleNamespace(task_id="tsk_workflow", status=TaskStatus.created)
-
-    def Session(self):
-        return _WorkflowSession(self)
-
-    async def get_organization(self, organization_id):
-        return SimpleNamespace(organization_id=organization_id) if organization_id == "org_1" else None
-
-    async def get_task(self, task_id, organization_id):
-        return self.task if task_id == self.task.task_id and organization_id == "org_1" else None
-
-    async def update_task(self, task_id, organization_id, status):
-        if task_id == self.task.task_id and organization_id == "org_1":
-            self.task.status = status
-        return self.task
-
 
 # ============================================================
 # Template Registry tests
@@ -216,8 +163,7 @@ class TestValidateParameters(unittest.TestCase):
     def test_valid_params(self):
         params = {
             "supplier_portal_url": "https://supplier.example.com",
-            "username": "user1",
-            "password": "pass123",
+            "credential_id": "cred_demo",
             "supplier_code": "SUP-001",
             "material_code": "MAT-001",
             "start_date": "2026-01-01",
@@ -232,13 +178,12 @@ class TestValidateParameters(unittest.TestCase):
         result = validate_parameters(self._quote_ledger_params(), params)
         assert result.valid is False
         missing_names = {e.param_name for e in result.errors}
-        assert "username" in missing_names
-        assert "password" in missing_names
+        assert "credential_id" in missing_names
 
     def test_invalid_url(self):
         params = {
             "supplier_portal_url": "not-a-url",
-            "username": "u", "password": "p",
+            "credential_id": "cred_demo",
             "supplier_code": "SUP-001", "material_code": "MAT-001",
             "start_date": "2026-01-01", "end_date": "2026-02-01",
         }
@@ -249,7 +194,7 @@ class TestValidateParameters(unittest.TestCase):
     def test_invalid_date(self):
         params = {
             "supplier_portal_url": "https://supplier.example.com",
-            "username": "u", "password": "p",
+            "credential_id": "cred_demo",
             "supplier_code": "SUP-001", "material_code": "MAT-001",
             "start_date": "2026-13-01",  # invalid month
             "end_date": "2026-02-01",
@@ -261,7 +206,7 @@ class TestValidateParameters(unittest.TestCase):
     def test_date_range_exceeds_limit(self):
         params = {
             "supplier_portal_url": "https://supplier.example.com",
-            "username": "u", "password": "p",
+            "credential_id": "cred_demo",
             "supplier_code": "SUP-001", "material_code": "MAT-001",
             "start_date": "2024-01-01",
             "end_date": "2026-01-01",  # > 365 days
@@ -273,7 +218,7 @@ class TestValidateParameters(unittest.TestCase):
     def test_end_before_start(self):
         params = {
             "supplier_portal_url": "https://supplier.example.com",
-            "username": "u", "password": "p",
+            "credential_id": "cred_demo",
             "supplier_code": "SUP-001", "material_code": "MAT-001",
             "start_date": "2026-03-01",
             "end_date": "2026-01-01",
@@ -285,7 +230,7 @@ class TestValidateParameters(unittest.TestCase):
     def test_invalid_integer(self):
         params = {
             "purchase_portal_url": "https://procurement.example.com",
-            "username": "u", "password": "p",
+            "credential_id": "cred_demo",
             "days_ahead": "not_a_number",
         }
         result = validate_parameters(PURCHASE_ORDER_DUE.parameters, params)
@@ -296,7 +241,7 @@ class TestValidateParameters(unittest.TestCase):
         """Optional params with defaults should not trigger missing error."""
         params = {
             "purchase_portal_url": "https://procurement.example.com",
-            "username": "u", "password": "p",
+            "credential_id": "cred_demo",
             # days_ahead has default="7", department is optional
         }
         result = validate_parameters(PURCHASE_ORDER_DUE.parameters, params)
@@ -307,8 +252,7 @@ class TestValidateParameters(unittest.TestCase):
             PURCHASE_ORDER_DUE.parameters,
             {
                 "purchase_portal_url": "https://procurement.example.com",
-                "username": "u",
-                "password": "p",
+                "credential_id": "cred_demo",
                 "untrusted_url": "https://evil.example.com",
             },
         )
@@ -348,17 +292,8 @@ class TestWorkflowAPI(unittest.TestCase):
             procurement_category_ids=["cat_a"],
         )
         self.app.dependency_overrides[get_current_user] = lambda: self.user
-        self.database = _WorkflowDatabase()
-        self.run_task = AsyncMock(return_value=self.database.task)
-        self.patches = [
-            patch.object(routes, "forge_app", SimpleNamespace(DATABASE=self.database)),
-            patch.object(routes.task_v1_service, "run_task", self.run_task),
-            patch.object(
-                routes.settings,
-                "PROCUREMENT_SMOKE_ALLOWED_URLS",
-                "https://supplier.example.com,https://procurement.example.com",
-            ),
-        ]
+        self.run_task = AsyncMock()
+        self.patches = [patch.object(routes.procurement_routes.task_v1_service, "run_task", self.run_task)]
         for active_patch in self.patches:
             active_patch.start()
         self.client = TestClient(self.app)
@@ -401,115 +336,21 @@ class TestWorkflowAPI(unittest.TestCase):
         resp = self.client.get("/enterprise/workflows/templates/tpl_fake")
         assert resp.status_code == 404
 
-    def test_instantiate_success(self):
-        resp = self.client.post(
-            "/enterprise/workflows/instantiate/tpl_supplier_quote_ledger",
-            json=self._body(
-                {
-                    "supplier_portal_url": "https://supplier.example.com",
-                    "username": "testuser",
-                    "password": "Secret123",
-                    "supplier_code": "SUP-001",
-                    "material_code": "MAT-001",
-                    "start_date": "2026-01-01",
-                    "end_date": "2026-03-01",
-                },
-            ),
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["template_id"] == "tpl_supplier_quote_ledger"
-        assert data["validation_passed"] is True
-        assert data["task_id"] == "tsk_workflow"
-        assert data["task_status"] == "created"
-        assert data["execution_mode"] == "real"
-        assert data["sensitive_parameters_connected"] is False
-        # Sensitive params should be masked
-        assert "Secret123" not in data["stored_parameters"]["password"]
-        assert "****" in data["stored_parameters"]["password"] or "*" in data["stored_parameters"]["password"]
-        # Non-sensitive params should be visible
-        assert data["stored_parameters"]["username"] == "testuser"
-        kwargs = self.run_task.await_args.kwargs
-        assert kwargs["defer_execution"] is True
-        assert kwargs["task"].url == "https://supplier.example.com/"
-        assert "Secret123" not in kwargs["task"].navigation_goal
-        assert any(isinstance(row, TaskExtensionModel) for row in self.database.rows)
-        assert any(isinstance(row, ProcurementCoordinationStateModel) for row in self.database.rows)
-
-    def test_instantiate_validation_fail(self):
-        resp = self.client.post(
-            "/enterprise/workflows/instantiate/tpl_supplier_quote_ledger",
-            json=self._body(
-                {
-                    "supplier_portal_url": "not-a-url",
-                },
-            ),
-        )
-        assert resp.status_code == 422
-        assert "validation failed" in resp.json()["detail"].lower()
-
-    def test_instantiate_not_found(self):
-        resp = self.client.post(
-            "/enterprise/workflows/instantiate/tpl_fake",
-            json=self._body({}),
-        )
-        assert resp.status_code == 404
-
-    def test_sensitive_masked_in_response(self):
-        resp = self.client.post(
-            "/enterprise/workflows/instantiate/tpl_rfq_status",
-            json=self._body(
-                {
-                    "procurement_portal_url": "https://procurement.example.com",
-                    "username": "agent",
-                    "password": "SuperSecret!",
-                    "request_ids": "RFQ001,RFQ002",
-                },
-            ),
-        )
-        assert resp.status_code == 200
-        stored = resp.json()["stored_parameters"]
-        assert stored["password"] != "SuperSecret!"
-        assert stored["password"].startswith("S")  # mask keeps first char
-        assert stored["password"].endswith("!")  # mask keeps last char
-
-    def test_instantiate_rejects_non_allowlisted_url_before_task_creation(self):
-        response = self.client.post(
-            "/enterprise/workflows/instantiate/tpl_purchase_order_due",
-            json=self._body({
-                "purchase_portal_url": "https://evil.example.com",
-                "username": "buyer",
-                "password": "secret",
-            }),
-        )
-        assert response.status_code == 400
+    def test_all_legacy_templates_fail_closed_before_native_task_creation(self):
+        for template_id in TEMPLATE_REGISTRY:
+            with self.subTest(template_id=template_id):
+                response = self.client.post(
+                    "/enterprise/workflows/instantiate/" + template_id,
+                    json=self._body({}), headers={"Idempotency-Key": "demo"},
+                )
+                assert response.status_code == 422
+                assert "credential reference" in response.json()["detail"]
         self.run_task.assert_not_awaited()
 
-    def test_native_task_failure_returns_no_task_id(self):
-        self.run_task.side_effect = RuntimeError("database down")
-        response = self.client.post(
-            "/enterprise/workflows/instantiate/tpl_purchase_order_due",
-            json=self._body({
-                "purchase_portal_url": "https://procurement.example.com",
-                "username": "buyer",
-                "password": "secret",
-            }),
-        )
-        assert response.status_code == 503
-        assert "task_id" not in response.json()
-
-    def test_enterprise_context_failure_cancels_native_task(self):
-        self.database.fail_commit = True
-        response = self.client.post(
-            "/enterprise/workflows/instantiate/tpl_purchase_order_due",
-            json=self._body({
-                "purchase_portal_url": "https://procurement.example.com",
-                "username": "buyer",
-                "password": "secret",
-            }),
-        )
-        assert response.status_code == 503
-        assert self.database.task.status == TaskStatus.canceled
+    def test_instantiate_not_found(self):
+        response = self.client.post("/enterprise/workflows/instantiate/tpl_fake", json=self._body({}), headers={"Idempotency-Key": "demo"})
+        assert response.status_code == 404
+        self.run_task.assert_not_awaited()
 
 
 if __name__ == "__main__":

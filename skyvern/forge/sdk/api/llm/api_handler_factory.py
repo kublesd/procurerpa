@@ -535,6 +535,8 @@ class LLMAPIHandlerFactory:
             Returns:
                 The response from the LLM router.
             """
+            from enterprise.workflows.runtime import safe_model_inputs
+            prompt, screenshots = safe_model_inputs(prompt, screenshots, use_message_history)
             start_time = time.time()
 
             if parameters is None:
@@ -932,12 +934,20 @@ class LLMAPIHandlerFactory:
     def get_llm_api_handler(
         llm_key: str,
         base_parameters: dict[str, Any] | None = None,
+        *,
+        strict_response: bool = False,
     ) -> LLMAPIHandler:
         try:
             llm_config = LLMConfigRegistry.get_config(llm_key)
         except InvalidLLMConfigError:
             return dummy_llm_api_handler
 
+        if strict_response and (
+            not isinstance(llm_config, LLMConfig)
+            or llm_key.startswith("openrouter/")
+            or llm_key == "OPENAI_COMPATIBLE"
+        ):
+            raise ValueError("Strict response requires a direct registered model")
         if LLMConfigRegistry.is_router_config(llm_key):
             return LLMAPIHandlerFactory.get_llm_api_handler_with_router(llm_key)
 
@@ -970,6 +980,13 @@ class LLMAPIHandlerFactory:
             window_dimension: Resolution | None = None,
             force_dict: bool = True,
         ) -> dict[str, Any] | Any:
+            if strict_response and any((step, task_v2, thought, ai_suggestion, screenshots, use_message_history)):
+                raise ValueError("Strict response cannot attach history or artifacts")
+            if strict_response and (litellm.global_disable_no_log_param or litellm.set_verbose):
+                raise ValueError("Strict response requires body logging to be disabled")
+            if not strict_response:
+                from enterprise.workflows.runtime import safe_model_inputs
+                prompt, screenshots = safe_model_inputs(prompt, screenshots, use_message_history)
             start_time = time.time()
             active_parameters = base_parameters or {}
             if parameters is None:
@@ -1002,7 +1019,9 @@ class LLMAPIHandlerFactory:
                     active_parameters, DEFAULT_THINKING_BUDGET, llm_config, prompt_name
                 )
 
-            context = skyvern_context.current()
+            if strict_response:
+                active_parameters.update({"no-log": True, "cache": {"no-cache": True, "no-store": True}})
+            context = None if strict_response else skyvern_context.current()
             is_speculative_step = step.is_speculative if step else False
             should_persist_llm_artifacts, artifact_targets = _get_artifact_targets_and_persist_flag(
                 step, is_speculative_step, task_v2, thought, ai_suggestion
@@ -1202,6 +1221,16 @@ class LLMAPIHandlerFactory:
                     )
                     raise LLMProviderError(llm_key) from None
 
+                if strict_response:
+                    # Risk review has no Artifact target; never log or repair provider text.
+                    try:
+                        content = response.choices[0].message.content
+                        if not isinstance(content, str) or len(content) > 4096:
+                            raise ValueError
+                        return json.loads(content)
+                    except (ValueError, TypeError, AttributeError, IndexError):
+                        raise ValueError("Invalid structured model response") from None
+
                 llm_response_json = _safe_model_dump_json(response)
                 if should_persist_llm_artifacts:
                     artifacts.append(
@@ -1337,7 +1366,8 @@ class LLMAPIHandlerFactory:
                 return parsed_response
             finally:
                 try:
-                    await app.ARTIFACT_MANAGER.bulk_create_artifacts(artifacts)
+                    if not strict_response:
+                        await app.ARTIFACT_MANAGER.bulk_create_artifacts(artifacts)
                 except Exception:
                     LOG.error("Failed to persist artifacts", exc_info=True)
 
@@ -1451,6 +1481,8 @@ class LLMCaller:
         force_dict: bool = True,
         **extra_parameters: Any,
     ) -> dict[str, Any] | Any:
+        from enterprise.workflows.runtime import safe_model_inputs
+        prompt, screenshots = safe_model_inputs(prompt, screenshots, use_message_history)
         start_time = time.perf_counter()
         active_parameters = self.base_parameters or {}
         if parameters is None:

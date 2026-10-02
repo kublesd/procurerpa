@@ -151,3 +151,64 @@
 - 并发：保留 TaskExtension 独占 claim，企业快照用 task_id + organization_id + version CAS；恢复 API 可携带 expected_version，过期返回 409。只读 quote-state API 复用采购读取权限，并只返回标识、步骤和版本。
 - 历史兼容：不批量回填。无快照旧任务首次合法状态变更时建立版本 1；未发生变更的旧任务返回 state=null。复用现有 JSON/版本列，不新增迁移。
 - 保留：其他 Skill/template/Coordinator/Workflow 链的统一事务与页面自动恢复仍未完成；旧 best-effort 审计模式仅保留给未纳入本切片的调用方。
+
+## 2026-09-22：APPROVAL-01 使用版本化 CNY 常量和同组织合规路由
+
+- 原因：版本二简历要求组织、部门、品类、角色和金额共同形成确定性审批路由；当前生产创建链未调用 `route_approval`，且审批记录缺少策略快照。用户授权依据简历目标代为冻结阶段 0 策略。
+- 取舍：复用现有 Decimal/CNY 阈值作为 `approval-cny-v1`，生效时间固定为 `2026-09-22T00:00:00Z`，只作用于新建审批。high 路由到申请部门的品类 approver；critical 按同组织唯一 `department_code=COMPLIANCE` 路由到具备品类授权的 approver，缺失、重复或无人具备授权时失败关闭。
+- 实时协调：为实现版本二简历的 Redis Pub/Sub 目标，审批决定事务提交后向组织隔离 channel 发布安全通知，请求人工作台通过受权 long-poll 消费后重新读取 PostgreSQL；事件只降低通知延迟，不是审批事实或执行授权。Redis 故障/丢事件回退数据库轮询，批准后仍需请求人显式 continue。
+- 否决方案：不建阈值配置平台，不使用跨组织或全局硬编码合规部门 ID，不让 critical 回退申请部门，不增加多级会签；不让 Pub/Sub 消息携带金额、备注或正文，不因消息到达自动执行采购，也不让发布失败回滚已提交审批。
+- 约束：组织、部门、品类和角色以数据库事实为准；金额使用边界校验后的 Decimal。客户端不能覆盖策略版本、生效时间、阈值、路由或审批角色；LLM 不能改变风险下限、审批或供应商推荐。订阅必须复用审批可见范围，收到事件后必须重查数据库。
+
+## 2026-09-26：LLM-RESILIENCE-01 保留原生重试与报价缺失事实
+
+- 政策来源：用户明确选择仅规范大小写和首尾空格，最终仍只接受 unit/CNY；无币种别名、包装单位或汇率换算。
+- 取舍：继续使用原生 Skyvern JSON/Markdown 解析、provider 配置与 ForgeAgent 有限 step retry；企业层不重放执行器、不增加 retry wrapper，非法结果或原生失败沿既有 Review/quote-state 转人工。demo retry 保留原有 demo 调用方，生产仅复用其无副作用 Markdown 清理函数。
+- 原生边界：通用 schema filler 会把缺失价格、运费、交期等数值补成 0，企业入库层无法辨别该 0 是否为源页面事实。新报价 schema 增加 `x-skyvern-preserve-missing=true`，原生 filler 原样交回候选结果，由企业 Pydantic/Decimal/Artifact 校验决定是否入库；无标记的其他抽取保持原行为。此处为必要的最小原生修改，不建立第二套抽取器。
+- 解析与安全：企业层只接受对象或完整 JSON/Markdown JSON，不修补残缺 JSON、不猜字段；字符串中的数字直接使用 `json.loads(parse_float=Decimal)`，避免 Pydantic JSON 入口的浮点中转。额外字段拒绝，异常链不附原始候选正文；不新增响应正文日志、审计或业务字段。
+- 兼容与限制：恢复入口识别新旧两种固定报价 schema，不回填或改写历史 Task；旧任务已由原生补过的默认值、或已解析为浮点的数字无法反向恢复原始信息。本阶段不宣称修复历史数据，也不改写整个原生 provider/Artifact 存储体系。真实敏感采购数据仍不得进入 LLM。
+
+## 2026-09-26：AI-RISK-01 只发送规则枚举并保留原生模型边界
+
+- 授权：用户启动阶段 3，对模型/数据/保留期及预算/拆单来源均授权“你来决定”。选择仓库已有 Google Gemini `GEMINI_2.5_FLASH`，仅使用已注册配置，不读取凭据确认可用性、不回退其他提供方。本轮仅以受控替身验证，不调用外部模型。
+- 最小数据：quote-task 在组织/部门/品类校验与幂等查重后复用 detect_risk；无命中跳过，命中仅发送服务端规则类别与确定性等级。客户端 redacted_description 只供本地规则识别，标签不视为脱敏证明，不发送金额、供应商标识、页面、历史消息或说明正文。原始预算/关联申请事实不存在，不用文本推断预算超额或拆单。
+- 输出与保留：只接受单字段 risk_level 枚举；忽略自由文本的方案不足以避免底层日志泄漏，故原生 direct handler 新增 strict_response 选项，在通用修复解析/Artifact/响应日志之前严格解析，禁止附带 Artifact/历史，隔离继承的浏览器上下文，禁用 LiteLLM 普通回调和读写缓存；禁用 no-log 或启用 verbose 时拒绝调用。应用正文保留期为零；对发出的非敏感枚举不额外约束提供方保留期，不承诺提供方零保留或已核实账户政策。
+- 决策与预算：模型只能保持/提高风险，不决定审批或采购；未配置/非法/异常沿现有保守回退（至少 high，critical 不降级），风险/审批/审计复用原事务持久化。单次最多 2048 completion tokens（容纳原生默认 1024 thinking budget），provider timeout 12 秒，企业边界 15 秒，不增加重试。只保存服务端固定说明、规则依据、stage 和 fallback，不保存模型自由说明。
+- 范围与限制：smoke-task 与隔离 demo 保留原行为；没有新增 SDK、配置平台、迁移或第二运行时。strict 路径不写原生正文 Artifact 或 token/cost 记录；真实用量聚合留给 MODEL-COST-01。预算/拆单权威集成、丰富上下文、提供方实调与量化测量保留；删除简历 70% 断言，不把测试分布当成生产节省率。
+
+## 2026-09-26：PLANNER-01 首个切片使用 quote-task 受限枚举计划
+
+- 授权：用户启动阶段 4，并明确选择“采用受限 Planner（推荐）”；模型只返回允许的未完成步骤枚举，服务端校验顺序，失败回退既有确定性链，不接自由文本计划或自动重放。
+- 取舍：首个切片使用 execute_native → persist_quote；仅发送固定步骤/完成枚举，复用已注册 GEMINI_2.5_FLASH 和 strict_response，12 秒 provider / 15 秒企业超时，无新增重试。模型计划只能通过完整顺序校验后参与调度，不能修改 Task 目标、URL、金额、权限或审批。没有可选业务顺序，因此本切片不宣称通用任务分解或规划收益。
+- 状态：计划和安全审计先同事务提交；Task.running/企业状态/审计在浏览器调用前提交；最终业务入库和完成状态/审计保持同事务。继续使用同一 TaskExtension 独占 claim 和 coordination state CAS，无新表/引擎。原生 completed 的恢复只规划 persist_quote，running/queued 等歧义态不调用模型、不重跑而转人工。已保存有效计划在恢复时复用，已完成 Task 的剩余计划最多更新一次。
+- 兼容：旧任务在首次合法恢复时懒建受限计划；计划提交后入库失败，计划保留可重试，报价/完成状态/完成审计一起回滚。人工补录只结束企业计划，只有同组织原生 Task 确实 completed 才记录 execute_native 完成。响应仍仅返回既有安全标识与版本；模型输出原文不持久化，source 明确区分 llm 与 deterministic_fallback。
+- 保留：旧 PlannerAgent/Coordinator/demo 继续隔离；其他模板、Skill 粒度执行与凭据解析、真实模型/浏览器 smoke 不在本切片，不修改现有 block.py 删除，不创建第二套浏览器运行时。
+
+
+## 2026-09-30：SKILL-01 首个切片复用无凭据 quote-task/v1
+
+- 授权：用户要求继续阶段 4，并明确采用无凭据报价切片；登录、凭据提供方、运行身份与轮换/吊销留待独立确认。
+- 取舍：使用既有 quote-task/v1 作为代表，增加 POST /api/v1/enterprise/workflows/instantiate/quote-task/v1；请求复用 QuoteTaskRequest 与 Idempotency-Key，直接调用原采购路由。模板入口保留开发环境、受控 URL、四维权限、风险/审批、显式 continue、独占 claim、Planner/CAS 和 Decimal/Artifact 校验；不创建另一套 Task 或 Pipeline 执行器，也不把六个历史模板改名冒充已真实化。
+- 证据：coordination state 保存 table_extract 的安全投影与 Skill 审计，同报价/人工核验/状态事务提交。这里只映射原生报价抽取步骤，不执行独立 Playwright Skill。只有确定性校验后的原生 extracted_information 入库调用能标记 completed；人工核验及直接人工报价都标记 manual_completed，不因 Task.completed 推断人工结果来自原生提取。旧快照无 Skill 字段时显示 not_connected，首次合法状态变更才补投影。
+- 失败关闭：六个历史模板仍可查询，但列表/详情标记 not_connected，实例化在创建 Task 前返回 workflow_credentials_not_connected。原生编译器拒绝 login/session_keep_alive，避免丢弃凭据后仍宣称登录完成；独立 demo Skill 定义与 simulated Pipeline 保留。
+- 保留：代表模板为 API 切片，前端模板目录未接入；其余 Skill、历史模板的业务步骤、凭据引用和完整原生 Workflow 仍未统一。没有新增依赖、迁移、模型职责或真实外部调用，不改变既有 block.py 删除。
+
+
+## 2026-09-30：阶段 4 复用原生 Workflow 与组织内凭据引用
+
+- 授权：用户要求继续直至整个阶段 4 完成，在上轮列出凭据策略与恢复 block.py 两项确认后回复“继续”；本轮按提出的策略推进，并只从当前 HEAD 恢复该文件。此前报价切片的范围与停止记录保留为历史，不再限制本轮任务。
+- 执行与事实：七 Skill 编译为现有 Login/Navigation/Extraction/FileDownload Block，六模板共享原生 Workflow 创建、prepare 和 AsyncExecutorFactory。准备的 run 固定其 workflow_id/版本，避免后续模板更新改变凭据与步骤。Task/Block/Artifact 仍拥有浏览器事实，quote-task/v1 仍调用既有采购 API，不改变 Decimal、风险、审批或人工报价决定。
+- 持久化：原生登录前尚无 Task，既有 coordination 表的 Task 外键不能承载授权与准备态；因此 ent_013 只增加 procurement_workflow_instances 保存组织/部门/品类/请求人、幂等摘要、原生引用和安全状态。该表不是另一执行引擎。计划/状态/审计同事务，running 在原生派发前提交；每步核对剩余计划，完成必须有同组织原生 Task、Block、Artifact，表格另经结构校验。
+- 凭据：沿原生 CredentialVaultService 按组织解析 credential_id，仅允许无 TOTP、无浏览器配置的 password 引用及精确受控 tested_url。启动、恢复、每步与密码输入重查执行人授权、用途、删除和 modified_at；吊销或轮换失败关闭。只允许发起人或组织管理员显式执行；管理员作为当前运行身份。凭据不得作为普通模板参数、模型输入、数据库输出或异常文本保存。
+- 安全证据：已知秘密在 Prompt/输出/原生日志/创建和更新的文本 Artifact 掩码（含 JSON/HTML 转义）；认证 Workflow 禁模型历史、图片输入、强制秘密模板、录屏、截图、PDF、二进制和路径 Artifact。秘密只在受控 URL 的原生文本输入边界解析，其他动作拒绝解析。该选择牺牲视觉和二进制留存能力，不能宣称图片自动脱敏或任意敏感采购正文已获准。
+- 恢复与取消：只有原生 created 且尚无 Block 的 ready 实例可派发；preparing/running 歧义转人工，不自动重放。恢复/终止要求 expected_version，终止同事务取消原生 run 和未完成 Task，后续准备或派发异常不能覆盖已提交终态。session_keep_alive 是有界原生会话检查/重新登录，不是后台永久保活服务。
+- 验收边界：代表模板运行真实路由、转换器、prepare、原生步骤入口和 PostgreSQL；vault/browser/provider 仅用合成替身。其余五模板通过相同转换与安全契约，未宣称真实供应商全部完成或外部凭据可用。ent_013 仅在隔离测试库验证，生产迁移、真实 smoke、全量应用测试和阶段 5 均未执行。
+
+
+## 2026-10-01：MODEL-COST-01 以当前 scrape 与 Step 审计归属模型
+
+- 授权：用户明确启动阶段 5；检查期间 block.py 从已有修改变成删除后，用户单独授权从当前 HEAD 恢复。只恢复该文件，并保留企业模板禁强制秘密与输出掩码边界；不访问真实凭据、模型、供应商或生产环境。
+- 特征生命周期：在已有 scrape 后、当前提示词/Vertex 缓存建立前读取原生结构树，保存节点/iframe 深度/表单/Shadow DOM 的计数和布尔摘要；不增加抓取或模型调用，不保存原始树/属性/文本。AJAX/WebSocket 无可信信号，记为 not_observed；缺失结构时保留已有注册静态 key，首次无 key 的任务使用既有静态动态门户档位。
+- 模型归属：当前 Step 保存瞬时路由，当前调用使用 Task 副本而不覆盖 Task 的初始模型；同组织授权上下文与 Step 路由审计先提交，再构建提示词。无可用注册 key 或路由审计失败沿原生失败/重试边界停止，不静默回到默认 handler。Step 成本按持久路由归类；旧 Step 沿原 Task 档位。禁采购 speculative 预调用，避免并行步骤混用模型/缓存与用量归属。
+- 缓存与权限：保留原 Redis key 与 24h TTL。采购仅缓存无表单页面的 WAIT/SCROLL；认证实例、缺失结构、输入/上传/提交等不缓存。Dashboard 用量按组织/部门/品类隔离，组织级 Redis 统计仅 org_admin 可读；Redis 故障只标记 unavailable，不覆盖 PostgreSQL 用量或伪造命中率。提供方缓存 Token 与动作缓存查询命中分开显示。
+- 成本边界：展示原生 Step 报告成本（native_step_reported），不是供应商发票或新价格估算。缺失、零成本、非有限/负值均 unknown；不注入 demo 成本或补造价格。固定六个结构场景和顺序为 model-cost-v1；成对数值记录必须覆盖全部场景并具有相同成功结果，缺记录/失败不计节省率。外部输入仅标 reported_measurements，不宣称独立核实计费。真实 provider 基准需另行授权，不保留 60% 断言。

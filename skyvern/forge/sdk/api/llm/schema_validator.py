@@ -272,6 +272,10 @@ def validate_and_fill_extraction_result(
         LOG.debug("No schema provided, returning extraction result as-is")
         return extraction_result
 
+    # Monetary extraction must reach the caller's validator without invented zeroes.
+    if isinstance(schema, dict) and schema.get("x-skyvern-preserve-missing") is True:
+        return extraction_result
+
     if not validate_schema(schema):
         LOG.info("Schema is invalid, returning extraction result as-is without transformations")
         return extraction_result

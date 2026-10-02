@@ -30,6 +30,15 @@ from enterprise.llm.action_cache import (
     compute_goal_hash,
     sanitize_action_response,
 )
+from enterprise.llm.model_router import (
+    ModelRoutingUnavailable,
+    ProcurementPageKind,
+    resolve_model,
+    resolve_procurement_page,
+    runtime_page_features,
+    safe_feature_summary,
+)
+from enterprise.workflows.models import WorkflowInstanceModel
 from skyvern import analytics
 from skyvern.config import settings
 from skyvern.constants import (
@@ -179,6 +188,67 @@ class ForgeAgent:
         self.action_cache = action_cache
 
     @staticmethod
+    async def _procurement_context(session, task):
+        context = await session.scalar(
+            select(TaskExtensionModel).where(
+                TaskExtensionModel.task_id == task.task_id,
+                TaskExtensionModel.organization_id == task.organization_id,
+            )
+        )
+        if context is None and getattr(task, "workflow_run_id", None):
+            context = await session.scalar(
+                select(WorkflowInstanceModel).where(
+                    WorkflowInstanceModel.workflow_run_id == task.workflow_run_id,
+                    WorkflowInstanceModel.organization_id == task.organization_id,
+                )
+            )
+        return context
+
+    async def _route_procurement_step(self, task, step, scraped_page) -> None:
+        model = getattr(task, "model", None) or {}
+        if not (model.get("procurement_routing") or model.get("reason_code") or task.workflow_run_id):
+            return
+        async with app.DATABASE.Session() as session:
+            context = await self._procurement_context(session, task)
+            if context is None:
+                if model.get("procurement_routing"):
+                    raise ModelRoutingUnavailable("procurement_context_unavailable")
+                return
+            features = runtime_page_features(scraped_page)
+            if features is None and model.get("llm_key"):
+                from skyvern.forge.sdk.api.llm.config_registry import LLMConfigRegistry
+                if model["llm_key"] not in LLMConfigRegistry.get_model_names():
+                    raise ModelRoutingUnavailable("procurement_model_unavailable")
+                route = {key: model[key] for key in ("llm_key", "model_tier", "reason_code") if key in model}
+            else:
+                decision = (
+                    resolve_model(features) if features is not None
+                    else resolve_procurement_page(ProcurementPageKind.DYNAMIC_QUOTE_PORTAL)
+                )
+                route = decision.to_task_model()
+            route["feature_source"] = "native_scrape" if features is not None else "static_fallback"
+            route["features"] = safe_feature_summary(features) if features is not None else None
+            # Authenticated workflows and forms are never shared action-cache candidates.
+            route["cache_policy"] = "disabled" if task.workflow_run_id or (
+                features is None or features.form_field_count
+            ) else "safe_actions_only"
+            await write_audit_log(
+                session, task_id=task.task_id, org_id=task.organization_id,
+                department_id=context.department_id, action_index=step.order,
+                action_type="model_route", executor="agent", business_object_type="skyvern_step",
+                business_object_id=step.step_id,
+                input_value={**route, "resolved_model_key": route["llm_key"], "step_id": step.step_id},
+                commit=False,
+            )
+            await session.commit()
+            step.procurement_model_route = route
+
+    @staticmethod
+    def _step_routed_task(task, step):
+        route = getattr(step, "procurement_model_route", None)
+        return task.model_copy(update={"model": route}) if route else task
+
+    @staticmethod
     async def _audit_procurement_model_call(
         task: Task,
         step: Step,
@@ -186,17 +256,12 @@ class ForgeAgent:
         execution_result: str,
         error_message: str | None = None,
     ) -> None:
-        routing = getattr(task, "model", None) or {}
+        routing = getattr(step, "procurement_model_route", None) or getattr(task, "model", None) or {}
         if not routing.get("reason_code") or not routing.get("llm_key"):
             return
         try:
             async with app.DATABASE.Session() as session:
-                context = await session.scalar(
-                    select(TaskExtensionModel).where(
-                        TaskExtensionModel.task_id == task.task_id,
-                        TaskExtensionModel.organization_id == task.organization_id,
-                    )
-                )
+                context = await ForgeAgent._procurement_context(session, task)
                 if context is None:
                     return
                 await write_audit_log(
@@ -214,6 +279,8 @@ class ForgeAgent:
                         "resolved_model_key": routing["llm_key"],
                         "reason_code": routing["reason_code"],
                         "step_id": step.step_id,
+                        **({"feature_source": routing["feature_source"], "features": routing.get("features")}
+                           if routing.get("feature_source") else {}),
                     },
                     duration_ms=duration_ms,
                     execution_result=execution_result,
@@ -239,8 +306,9 @@ class ForgeAgent:
     ) -> dict[str, Any]:
         """Use the tenant-scoped persistent cache around the real action LLM call."""
         cache_key: str | None = None
-        if self.action_cache and prompt_name == EXTRACT_ACTION_PROMPT_NAME:
-            model_key = task.llm_key or getattr(llm_api_handler, "llm_key", None) or "default"
+        route = getattr(step, "procurement_model_route", None) or {}
+        if self.action_cache and prompt_name == EXTRACT_ACTION_PROMPT_NAME and route.get("cache_policy") != "disabled":
+            model_key = route.get("llm_key") or task.llm_key or getattr(llm_api_handler, "llm_key", None) or "default"
             cache_key = build_cache_key(
                 task.organization_id,
                 compute_dom_hash(scraped_page.build_element_tree(ElementTreeFormat.HTML)),
@@ -252,6 +320,11 @@ class ForgeAgent:
                 cached = await self.action_cache.get(cache_key)
                 if cached:
                     safe_cached = sanitize_action_response(cached)
+                    if route and safe_cached and any(
+                        action["action_type"].upper() not in {"WAIT", "SCROLL"}
+                        for action in safe_cached["actions"]
+                    ):
+                        safe_cached = None
                     parsed = (
                         parse_actions(task, step.step_id, step.order, scraped_page, safe_cached["actions"])
                         if safe_cached
@@ -264,6 +337,7 @@ class ForgeAgent:
                             task_id=task.task_id,
                             step_id=step.step_id,
                         )
+                        await self._audit_procurement_model_call(task, step, 0, "cache_hit")
                         return safe_cached
                     await self.action_cache.invalidate(cache_key)
             except Exception:
@@ -300,6 +374,11 @@ class ForgeAgent:
         )
         if cache_key and isinstance(response, dict):
             safe_response = sanitize_action_response(response)
+            if route and safe_response and any(
+                action["action_type"].upper() not in {"WAIT", "SCROLL"}
+                for action in safe_response["actions"]
+            ):
+                safe_response = None
             if safe_response:
                 parsed = parse_actions(task, step.step_id, step.order, scraped_page, safe_response["actions"])
                 if parsed and len(parsed) == len(safe_response["actions"]):
@@ -1164,6 +1243,7 @@ class ForgeAgent:
                 )
                 json_response = None
 
+            task = self._step_routed_task(task, step)
             detailed_agent_step_output.scraped_page = scraped_page
             detailed_agent_step_output.extract_action_prompt = extract_action_prompt
             actions: list[Action]
@@ -1208,8 +1288,11 @@ class ForgeAgent:
                         self.async_operation_pool.run_operation(task.task_id, AgentPhase.llm)
                         llm_key_override = None
 
-                    llm_api_handler = LLMAPIHandlerFactory.get_override_llm_api_handler(
-                        llm_key_override, default=app.LLM_API_HANDLER
+                    llm_api_handler = (
+                        LLMAPIHandlerFactory.get_llm_api_handler(step.procurement_model_route["llm_key"])
+                        if step.procurement_model_route else LLMAPIHandlerFactory.get_override_llm_api_handler(
+                            llm_key_override, default=app.LLM_API_HANDLER
+                        )
                     )
                     # Add caching flag to context for monitoring
                     if use_caching:
@@ -2037,9 +2120,9 @@ class ForgeAgent:
         browser_state: BrowserState,
         engine: RunEngine,
     ) -> SpeculativePlan | None:
-        if engine in CUA_ENGINES:
+        if engine in CUA_ENGINES or getattr(current_step, "procurement_model_route", None) or (task.model or {}).get("reason_code") or (task.model or {}).get("procurement_routing"):
             LOG.info(
-                "Skipping speculative extract-actions for CUA engine",
+                "Skipping speculative extract-actions for CUA or procurement step",
                 step_id=current_step.step_id,
                 task_id=task.task_id,
             )
@@ -2736,6 +2819,8 @@ class ForgeAgent:
         extract_action_prompt = ""
         prompt_name = EXTRACT_ACTION_PROMPT_NAME  # Default; overwritten below for non-CUA engines
         if engine not in CUA_ENGINES:
+            await self._route_procurement_step(task, step, scraped_page)
+            task = self._step_routed_task(task, step)
             extract_action_prompt, use_caching, prompt_name = await self._build_extract_action_prompt(
                 task,
                 step,
@@ -3893,12 +3978,14 @@ class ForgeAgent:
 
         await save_step_logs(step.step_id)
 
-        return await app.DATABASE.update_step(
+        updated = await app.DATABASE.update_step(
             task_id=step.task_id,
             step_id=step.step_id,
             organization_id=step.organization_id,
             **updates,
         )
+        updated.procurement_model_route = getattr(step, "procurement_model_route", None)
+        return updated
 
     async def update_task(
         self,

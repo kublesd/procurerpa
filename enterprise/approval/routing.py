@@ -4,7 +4,7 @@ Maps risk levels to approval requirements:
 - low: no action
 - medium: log only, no approval needed
 - high: route to department approver
-- critical: route to compliance dept approver + notify risk dept viewer
+- critical: route to a server-resolved compliance department approver
 """
 
 from dataclasses import dataclass, field
@@ -23,7 +23,7 @@ class ApprovalRoute:
     approver_category_id: str | None = None
 
 
-# Well-known department IDs (should match seed data)
+# Legacy demo identifiers; production resolves COMPLIANCE within its organization.
 COMPLIANCE_DEPT_ID = "dept_compliance"
 RISK_MGMT_DEPT_ID = "dept_risk_mgmt"
 
@@ -34,6 +34,7 @@ def route_approval(
     category_id: str | None = None,
     *,
     procurement_category_id: str | None = None,
+    compliance_department_id: str | None = None,
 ) -> ApprovalRoute:
     """Determine the approval route based on risk level.
 
@@ -71,13 +72,14 @@ def route_approval(
         )
 
     if risk_level == "critical":
+        if not compliance_department_id:
+            raise ValueError("Critical approval requires a resolved compliance department")
         return ApprovalRoute(
             requires_approval=True,
-            approver_department_id=COMPLIANCE_DEPT_ID,
+            approver_department_id=compliance_department_id,
+            approver_category_id=category_id,
             approver_role="approver",
-            notify_department_ids=[RISK_MGMT_DEPT_ID],
-            notify_roles=["viewer"],
-            description="Critical risk — requires compliance dept approver, risk dept notified",
+            description="Critical risk — requires same-organization compliance approver",
         )
 
     # Unknown risk level — treat as high conservatively

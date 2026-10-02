@@ -1,6 +1,6 @@
 """Opt-in PostgreSQL process-crash checks; no browser, provider, or production data.
 
-RUN01_TEST_DATABASE_URL must point at the disposable localhost:55439 PostgreSQL.
+RUN01_TEST_DATABASE_URL must point at disposable localhost PostgreSQL on 55439 or 15439.
 Each scenario owns a fresh schema and tests the real route, SQL locks and quote writes.
 """
 
@@ -36,13 +36,20 @@ from tests.unit.test_day_11_quotes import _user
 
 def _engine(schema):
     url = make_url(os.environ["RUN01_TEST_DATABASE_URL"])
-    assert url.host in ("localhost", "127.0.0.1") and url.port == 55439
+    assert url.host in ("localhost", "127.0.0.1") and url.port in (55439, 15439)
     assert schema.startswith("run01_test_") and schema.removeprefix("run01_test_").isalnum()
     return create_async_engine(url, connect_args={"server_settings": {"search_path": schema}})
 
 
 def _install(engine, monkeypatch, crash=None):
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+    from enterprise.agent import quote_planner
+
+    async def planner(prompt):
+        import json
+        return {"steps": json.loads(prompt.split("\n")[-1])["remaining"]}
+
+    monkeypatch.setattr(quote_planner, "call_quote_planner", planner)
 
     def interrupt(stage):
         if crash == stage:
@@ -198,7 +205,7 @@ async def test_process_crash_releases_exclusive_claim(monkeypatch, stage, approv
                 assert audit is not None and audit.organization_id == "org_a"
                 snapshot = await session.scalar(select(ProcurementCoordinationStateModel))
                 assert snapshot.current_plan["current_step"] == "needs_human"
-                assert snapshot.current_plan["plan_id"] == "quote:task_a" and snapshot.version == 2
+                assert snapshot.current_plan["plan_id"] == "quote:task_a" and snapshot.version == 4
             with pytest.raises(HTTPException) as repeated:
                 await recover()
             assert repeated.value.status_code == 409
@@ -213,7 +220,10 @@ async def test_process_crash_releases_exclusive_claim(monkeypatch, stage, approv
                 assert len((await session.scalars(select(SupplierQuoteModel))).all()) == 1
                 snapshot = await session.scalar(select(ProcurementCoordinationStateModel))
                 assert snapshot.current_plan["current_step"] == "completed"
-                assert snapshot.current_plan["plan_id"] == "quote:task_a" and snapshot.version == 2
+                assert snapshot.current_plan["plan_id"] == "quote:task_a"
+                assert snapshot.version == (5 if stage == "completed" else 4)
+                assert snapshot.current_plan["orchestration"]["steps"] == []
+                assert snapshot.completed_subtask_ids == ["execute_native", "persist_quote"]
     finally:
         if child is not None:
             if child.poll() is None:

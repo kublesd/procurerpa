@@ -838,7 +838,8 @@ class WorkflowService:
             block_outputs=block_outputs,
         )
         workflow_run = await self.get_workflow_run(workflow_run_id=workflow_run_id, organization_id=organization_id)
-        workflow = await self.get_workflow_by_permanent_id(workflow_permanent_id=workflow_run.workflow_permanent_id)
+        # A prepared run owns an immutable version, including enterprise credential bindings.
+        workflow = await self.get_workflow(workflow_run.workflow_id, organization_id=organization_id)
         has_conditionals = workflow_script_service.workflow_has_conditionals(workflow)
         browser_profile_id = workflow_run.browser_profile_id
         close_browser_on_completion = browser_session_id is None and not workflow_run.browser_address
@@ -888,6 +889,8 @@ class WorkflowService:
                 workflow,
             )
         except Exception as e:
+            from enterprise.workflows.runtime import fail_native
+            await fail_native(workflow, workflow_run_id, organization_id)
             LOG.exception(
                 f"Error while initializing workflow run context for workflow run {workflow_run_id}",
                 workflow_run_id=workflow_run_id,
@@ -1606,6 +1609,8 @@ class WorkflowService:
                     )
                     return workflow_run, blocks_to_update, workflow_run_block_result, True, branch_metadata
 
+            from enterprise.workflows.runtime import before_native_block
+            await before_native_block(workflow, workflow_run_id, organization_id, block.label)
             parameters = block.get_all_parameters(workflow_run_id)
             await app.WORKFLOW_CONTEXT_MANAGER.register_block_parameters_for_workflow_run(
                 workflow_run_id, parameters, organization
@@ -2098,12 +2103,17 @@ class WorkflowService:
                 workflow_run_id=workflow_run_id,
             )
 
+            from enterprise.workflows.runtime import after_native_block
+            await after_native_block(workflow, workflow_run_id, organization_id, block.label, workflow_run_block_result)
+
             # Generate pending script after block completes successfully
             await self._generate_pending_script_for_block(workflow, workflow_run, workflow_run_block_result)
 
             return workflow_run, blocks_to_update, workflow_run_block_result, should_stop, branch_metadata
 
         except Exception as e:
+            from enterprise.workflows.runtime import fail_native
+            await fail_native(workflow, workflow_run_id, organization_id)
             LOG.exception(
                 f"Error while executing workflow run {workflow_run_id}",
                 workflow_run_id=workflow_run_id,

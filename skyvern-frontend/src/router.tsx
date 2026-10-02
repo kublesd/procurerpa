@@ -33,6 +33,7 @@ import { RunRouter } from "@/routes/runs/RunRouter";
 import { DashboardPage } from "@/routes/enterprise/dashboard/DashboardPage";
 import { ApprovalsPage } from "@/routes/enterprise/approvals/ApprovalsPage";
 import { AuditLogsPage } from "@/routes/enterprise/audit/AuditLogsPage";
+import { WorkflowTemplatesPage } from "@/routes/enterprise/workflows/WorkflowTemplatesPage";
 import { ProcurementWorkbenchPage } from "@/routes/enterprise/procurement/ProcurementWorkbenchPage";
 import { LoginPage } from "@/routes/auth/LoginPage";
 import { AuthGuard } from "@/components/AuthGuard";
@@ -261,6 +262,11 @@ const router = createBrowserRouter([
             element: <CredentialsPage />,
           },
         ],
+      },
+      {
+        path: "enterprise/templates",
+        element: <PageLayout />,
+        children: [{ index: true, element: <WorkflowTemplatesPage /> }],
       },
       {
         path: "enterprise/procurement",

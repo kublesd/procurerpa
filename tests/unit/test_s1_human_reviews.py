@@ -124,6 +124,10 @@ class _Session:
 
     async def scalar(self, statement):
         sql = str(statement)
+        if "SELECT procurement_human_reviews.artifact_id" in sql:
+            return self.database.review.artifact_id if self.database.review is not None else None
+        if "SELECT supplier_quotes.artifact_id" in sql:
+            return self.database.quote.artifact_id if self.database.quote is not None else None
         if "procurement_human_reviews" in sql:
             return self.database.review
         if "task_extensions" in sql:

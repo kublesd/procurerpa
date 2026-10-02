@@ -12,11 +12,11 @@ from sqlalchemy import delete, event, select, text, update
 from enterprise.approval import routes as approvals
 from enterprise.approval.models import ApprovalRequestModel
 from enterprise.audit.models import AuditLogModel
-from enterprise.auth.models import EnterpriseUserModel, TaskExtensionModel
+from enterprise.auth.models import EnterpriseUserModel, TaskExtensionModel, UserDepartmentRoleModel
 from enterprise.llm.human_intervention import ResolutionAction
 from enterprise.procurement import routes
 from enterprise.procurement.models import ProcurementCoordinationStateModel as State
-from enterprise.procurement.models import ProcurementHumanReviewModel, SupplierQuoteModel
+from enterprise.procurement.models import ProcurementHumanReviewModel, SupplierQuoteModel, UserProcurementCategoryModel
 from enterprise.procurement.quote_state import advance_quote_state, load_quote_state, quote_state_response
 from skyvern.forge.sdk.db.models import TaskModel
 from tests.integration.test_run01_recovery import _engine, _install, _seed
@@ -68,7 +68,9 @@ async def test_snapshot_restart_stale_version_and_safe_response(database):
         unchanged_old = await load_quote_state(unchanged, "task_a", "org_a")
         before = quote_state_response(old)
         assert before == dict(task_id="task_a", template_id="quote-task/v1", plan_id="quote:task_a",
-                              current_step="ready", input_ref="task_a", version=1)
+                              current_step="ready", input_ref="task_a", version=1, skill_execution_mode="real",
+                              skills=[dict(step_id="table_extract:0", skill_name="table_extract", task_id="task_a",
+                                           status="pending", artifact_id=None)])
         assert await load_quote_state(first, "task_a", "another_org") is None
         await advance(first, "running", expected_version=1)
         await first.commit()
@@ -87,7 +89,11 @@ async def test_snapshot_restart_stale_version_and_safe_response(database):
         state = quote_state_response(await load_quote_state(session, "task_a", "org_a"))
         assert state["version"] == 2 and state["plan_id"] == before["plan_id"]
         events = (await session.scalars(select(AuditLogModel))).all()
-        assert [json.loads(item.input_value)["version"] for item in events] == [1, 2]
+        assert [json.loads(item.input_value)["version"] for item in events
+                if item.action_type == "quote_state_changed"] == [1, 2]
+        assert [item.execution_result for item in events if item.action_type == "skill_state_changed"] == [
+            "pending", "running",
+        ]
     from enterprise.agent.coordinator import AgentCoordinator, CoordinationStateConflict
     coordinator = AgentCoordinator(None, None, session_factory=sessions)
     with pytest.raises(CoordinationStateConflict):
@@ -105,6 +111,10 @@ async def test_quote_business_state_and_audit_roll_back_together(database, table
     engine, sessions = database
     async with sessions() as session:
         await session.execute(update(TaskModel).values(status="completed"))
+        await routes.save_quote_plan(
+            session, task_id="task_a", org_id="org_a", department_id="dept_a", executor="user_a",
+            plan={"steps": ["persist_quote"], "completed": ["execute_native"], "source": "llm"},
+        )
         await session.commit()
     fault = fail_write(engine, table)
     try:
@@ -113,8 +123,12 @@ async def test_quote_business_state_and_audit_roll_back_together(database, table
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", fault)
     async with sessions() as session:
-        for model in (State, SupplierQuoteModel, AuditLogModel):
-            assert await session.scalar(select(model)) is None
+        assert await session.scalar(select(SupplierQuoteModel)) is None
+        snapshot = await session.scalar(select(State))
+        assert snapshot.version == 2 and snapshot.current_plan["current_step"] == "ready"
+        assert snapshot.current_plan["orchestration"]["steps"] == ["persist_quote"]
+        events = (await session.scalars(select(AuditLogModel))).all()
+        assert len(events) == 3 and all(item.execution_result != "completed" for item in events)
     result = await routes.recover_quote_task("task_a", _user())
     assert result.task_id == "task_a"
     async with sessions() as session:
@@ -143,11 +157,19 @@ async def test_running_audit_failure_prevents_native_execution(database, monkeyp
 
 async def test_initial_context_and_approval_roll_back_with_audit(database):
     engine, sessions = database
+    async with engine.begin() as connection:
+        await connection.run_sync(lambda conn: UserDepartmentRoleModel.__table__.create(conn, checkfirst=True))
+        await connection.run_sync(lambda conn: UserProcurementCategoryModel.__table__.create(conn, checkfirst=True))
     async with sessions() as session:
         await session.execute(delete(TaskExtensionModel))
+        session.add(EnterpriseUserModel(user_id="approver_a", organization_id="org_a", username="approver",
+                                       password_hash="not-a-login", display_name="Synthetic Approver"))
+        await session.flush()
+        session.add(UserDepartmentRoleModel(user_id="approver_a", department_id="dept_a", role="approver"))
+        session.add(UserProcurementCategoryModel(user_id="approver_a", category_id="pc_a"))
         await session.commit()
     payload = _payload()
-    payload.risk = routes.ProcurementRiskInput(total_amount_cny="1000000")
+    payload.risk = routes.ProcurementRiskInput(total_amount_cny="100000")
     risk = await routes.detect_risk(payload.risk.to_context())
     assert risk.risk_level in ("high", "critical")
     fault = fail_write(engine, "audit_logs")
@@ -162,10 +184,6 @@ async def test_initial_context_and_approval_roll_back_with_audit(database):
     approval_id = await routes._attach_procurement_context("task_a", payload, _user(), risk)
     approver = _user().model_copy(update={"user_id": "approver_a"})
     approver.department_roles = [approver.department_roles[0].model_copy(update={"role": "approver"})]
-    async with sessions() as session:
-        session.add(EnterpriseUserModel(user_id="approver_a", organization_id="org_a", username="approver",
-                                        password_hash="not-a-login", display_name="Synthetic Approver"))
-        await session.commit()
     fault = fail_write(engine, "audit_logs")
     try:
         with pytest.raises(RuntimeError):

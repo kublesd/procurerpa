@@ -157,4 +157,6 @@ async def test_invalid_or_failed_llm_keeps_deterministic_result() -> None:
 def test_existing_approval_routing_consumes_procurement_risk_levels() -> None:
     assert route_approval("low", "dept-buy").requires_approval is False
     assert route_approval("high", "dept-buy").approver_department_id == "dept-buy"
-    assert route_approval("critical", "dept-buy").approver_department_id == COMPLIANCE_DEPT_ID
+    with pytest.raises(ValueError):
+        route_approval("critical", "dept-buy")
+    assert route_approval("critical", "dept-buy", compliance_department_id=COMPLIANCE_DEPT_ID).approver_department_id == COMPLIANCE_DEPT_ID

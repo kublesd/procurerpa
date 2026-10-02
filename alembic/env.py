@@ -9,6 +9,7 @@ import enterprise.approval.models  # noqa: F401 - register approval models with 
 import enterprise.audit.models  # noqa: F401 - register audit models with Base.metadata
 import enterprise.auth.models  # noqa: F401 - register enterprise models with Base.metadata
 import enterprise.procurement.models  # noqa: F401 - register procurement models with Base.metadata
+import enterprise.workflows.models  # noqa: F401 - register native Workflow instances
 from alembic import context
 from skyvern.forge.sdk.db import models
 from skyvern.forge.sdk.settings_manager import SettingsManager

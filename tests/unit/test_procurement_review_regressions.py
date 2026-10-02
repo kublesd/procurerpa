@@ -20,7 +20,10 @@ from tests.unit.test_day_10_quotes import _quote
 def isolate_snapshot_storage(monkeypatch):
     # SQL snapshot/audit atomicity is exercised by test_state01_transactions against PostgreSQL.
     monkeypatch.setattr(routes, "advance_quote_state", AsyncMock())
+    monkeypatch.setattr(routes, "save_quote_plan", AsyncMock())
     monkeypatch.setattr(routes, "write_audit_log", AsyncMock())
+    from enterprise.agent import quote_planner
+    monkeypatch.setattr(quote_planner, "call_quote_planner", AsyncMock(side_effect=RuntimeError("unavailable")))
 
 
 def _install_recovery(monkeypatch, state=TaskStatus.created):
