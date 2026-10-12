@@ -6,6 +6,8 @@
 
 ## 当前目标
 
+当前 GitHub 仓库：[kublesd/procurerpa](https://github.com/kublesd/procurerpa)，`origin` 拉取和推送均使用该仓库。此前 `kublesd/procurerpa-enterprise` 已由用户声明作废，不再作为推送目标；下方旧仓库推送记录仅为历史证据。
+
 当前活动任务：无。`FRONTEND-01` 五阶段受控采购工作台已完成本轮工程验收；直接证据与未验证边界见文末。不自动扩展生产化或历史路线任务。
 
 - 完成定义：中文浅色采购闭环，刷新后可追踪任务、审批、核验、比价和模板实例，并追溯受权证据与审计。
@@ -573,3 +575,12 @@
 - 开工直接观察：Windows PowerShell；本地 HEAD 为 dfb9aa1，工作区干净；禁用凭据助手的只读 ls-remote 确认 GitHub main 仍为 dbf3d1c。非浅克隆、无共同祖先；推送地址核对为上述仓库且只有一个目标。
 - 内容证据与处理：GitHub main 与本地旧基线 4c86636 除本地保留的 `docs/interview_qa.md`、`docs/resume_guide.md` 外内容完全一致。执行 `git merge --no-commit --no-ff -s ours --allow-unrelated-histories origin/main`，待合并的 MERGE_HEAD 精确匹配远端；写树结果与 dfb9aa1 的文件树一致，工作文件无差异，暂存差异检查通过。本文追加后再验证只有本文发生内容变化，提交保留双方父提交。
 - 验证来源与边界：TypeScript 和两个 Python 文件 AST 通过属于上一提交轮直接证据；本推送轮不重跑业务测试或真实联调。前端分页、模板实例历史、大 JS chunk、构建警告及真实服务/生产验证债务继续保留。合并提交、普通推送和最终哈希核对结果以本轮 Git 输出、GitHub 分支及最终汇报为准。
+
+
+## 2026-10-12：正式仓库切换至 kublesd/procurerpa
+
+- 授权与范围：用户明确指定推送到 `https://github.com/kublesd/procurerpa`，并声明之前的仓库作废。更新 origin 的拉取/推送地址，保留新仓库已有提交，普通推送当前本地版本；内容修改仅为远端 README 修订及本文记录，不删除旧仓库、不强推、不切换分支或部署。
+- 完成定义与停止条件：origin 只有新仓库这一个拉取/推送目标，main 跟踪新 origin/main；实时 GitHub main 与本地 HEAD 一致、提交差距为零、工作区干净后停止。
+- 开工直接观察：Windows PowerShell，HEAD 为 `8c3f8850f509e6341f1945f7e3aeba628772d708`、工作区干净。新仓库默认分支为 main，提交为 `0dd700a8729c9dbedb6af6be5616fe0d7518df1c`，共同祖先为 ba8a948；远端独有提交只修订 README 的仓库地址与目录说明，本地 README 自共同祖先未改动。
+- 合并与实际检查：已将 origin 拉取/推送地址核对为新仓库，fetch 后以 `git merge --no-commit --no-ff origin/main` 正常合并。初始暂存修改只有 README，且与远端 README 精确一致；其余业务文件与本地 8c3f885 相同，暂存差异检查通过。README 新增的 8 项文件/目录引用均实际存在；旧仓库 URL 只保留在本文历史记录中。
+- 验证来源与保留边界：本轮不重跑业务测试或真实联调；此前 TypeScript/AST 和 FRONTEND-01 验收证据按原记录归属。前端分页、模板实例历史、大 JS chunk、构建警告及真实服务/生产验证债务继续保留。追加本文后的二文件边界、合并父提交、普通推送及最终远端核对结果以本轮 Git 输出、新 GitHub 分支及最终汇报为准。
