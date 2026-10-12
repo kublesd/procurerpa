@@ -564,3 +564,12 @@
 - 本次直接验证：Node 25.7.0 使用已安装 TypeScript 执行 `node node_modules/typescript/bin/tsc --noEmit --incremental false`，退出码 0；Python 3.12.4 使用 `-I -S` 和标准库 AST 解析 `enterprise/procurement/routes.py`、`tests/unit/test_frontend_task_links.py`，2 文件语法通过；工作区及暂存区 `git diff --check` 通过，暂存清单精确匹配 29 个候选文件，无遗漏的未暂存或未跟踪文件。未导入应用或读取环境文件，未安装依赖。
 - 验证来源：上方 2026-10-03 的 Vitest、后端回归、构建和合成 API 浏览器走查为历史记录，本提交轮未重新运行，不声明为本次回归结果。暂存区检查、提交结果与提交 ID 以本轮 Git 输出和最终汇报为准。
 - 保留边界：FRONTEND-01 的前端分页、模板实例历史列表、大 JS chunk 和构建警告债务继续保留；真实 PostgreSQL、供应商、模型、凭据、生产环境及全量应用回归未验证。本地与 GitHub main 没有共同祖先，历史对齐与推送需独立授权，本轮不处理。
+
+
+## 2026-10-12：GitHub main 推送授权与历史衔接
+
+- 授权与范围：用户在本地全部提交完成后明确要求“推送”，目标为 `https://github.com/kublesd/procurerpa-enterprise.git` 的 main。为完成普通推送，采用保留双方历史的合并；本轮只修改本文记录，不扩展业务实现、切换分支、强推、重写既有提交或部署。
+- 完成定义与停止条件：本地合并提交保留 `dfb9aa195179690fbe24de912aa2bc3967ebd367` 与 GitHub `dbf3d1c16488790c5ece8e04897fc8022b446884` 两条历史；普通推送后实时远端 main 与本地 HEAD 一致，上游设置为 origin/main，工作区干净后停止。
+- 开工直接观察：Windows PowerShell；本地 HEAD 为 dfb9aa1，工作区干净；禁用凭据助手的只读 ls-remote 确认 GitHub main 仍为 dbf3d1c。非浅克隆、无共同祖先；推送地址核对为上述仓库且只有一个目标。
+- 内容证据与处理：GitHub main 与本地旧基线 4c86636 除本地保留的 `docs/interview_qa.md`、`docs/resume_guide.md` 外内容完全一致。执行 `git merge --no-commit --no-ff -s ours --allow-unrelated-histories origin/main`，待合并的 MERGE_HEAD 精确匹配远端；写树结果与 dfb9aa1 的文件树一致，工作文件无差异，暂存差异检查通过。本文追加后再验证只有本文发生内容变化，提交保留双方父提交。
+- 验证来源与边界：TypeScript 和两个 Python 文件 AST 通过属于上一提交轮直接证据；本推送轮不重跑业务测试或真实联调。前端分页、模板实例历史、大 JS chunk、构建警告及真实服务/生产验证债务继续保留。合并提交、普通推送和最终哈希核对结果以本轮 Git 输出、GitHub 分支及最终汇报为准。
