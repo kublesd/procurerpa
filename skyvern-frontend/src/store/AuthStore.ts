@@ -4,6 +4,8 @@ import {
   removeAuthorizationHeader,
 } from "@/api/AxiosClient";
 
+import { queryClient } from "@/api/QueryClient";
+
 const LS_TOKEN = "procurerpa_auth_token";
 const LS_USER_ID = "procurerpa_auth_user_id";
 const LS_DISPLAY_NAME = "procurerpa_auth_display_name";
@@ -25,6 +27,7 @@ const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: false,
 
   login: (token: string, userId: string, displayName: string) => {
+    queryClient.clear();
     localStorage.setItem(LS_TOKEN, token);
     localStorage.setItem(LS_USER_ID, userId);
     localStorage.setItem(LS_DISPLAY_NAME, displayName);
@@ -33,11 +36,17 @@ const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
+    queryClient.clear();
     localStorage.removeItem(LS_TOKEN);
     localStorage.removeItem(LS_USER_ID);
     localStorage.removeItem(LS_DISPLAY_NAME);
     removeAuthorizationHeader();
-    set({ token: null, userId: null, displayName: null, isAuthenticated: false });
+    set({
+      token: null,
+      userId: null,
+      displayName: null,
+      isAuthenticated: false,
+    });
   },
 
   initialize: () => {

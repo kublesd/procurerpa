@@ -4,6 +4,8 @@ import { apiBaseUrl } from "@/util/env";
  * Fetch wrapper that automatically adds the enterprise auth token.
  * Reads the token from localStorage (same key as AuthStore).
  */
+import { useAuthStore } from "@/store/AuthStore";
+
 const LS_TOKEN = "procurerpa_auth_token";
 const API_PREFIX = "/api/v1";
 
@@ -23,5 +25,12 @@ export async function authFetch(
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(resolveApiInput(input), { ...init, headers });
+  const response = await fetch(resolveApiInput(input), { ...init, headers });
+  if (
+    response.status === 401 &&
+    token &&
+    token === useAuthStore.getState().token
+  )
+    useAuthStore.getState().logout();
+  return response;
 }

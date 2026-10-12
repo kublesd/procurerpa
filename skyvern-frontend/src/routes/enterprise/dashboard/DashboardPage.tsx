@@ -353,7 +353,7 @@ function RecentTasksTable({ data }: { data: RecentTask[] }) {
               <td className="py-3">
                 <a
                   className="font-medium underline"
-                  href={`/tasks/${task.task_id}/diagnostics`}
+                  href={`/enterprise/tasks/${encodeURIComponent(task.task_id)}`}
                   style={{ color: "var(--procurerpa-blue)" }}
                 >
                   {task.title || task.task_id}
@@ -401,9 +401,18 @@ export function DashboardPage() {
   const [costError, setCostError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setError(null);
+    setCostError(null);
+    setCost(null);
+    setOverview(null);
+    setTrend([]);
+    setCategories([]);
+    setRecentTasks([]);
     fetchJson<CostData>("/api/v1/enterprise/dashboard/cost")
       .then((nextCost) => {
         if (active) setCost(nextCost);
@@ -441,7 +450,7 @@ export function DashboardPage() {
     return () => {
       active = false;
     };
-  }, [t]);
+  }, [t, refreshVersion]);
 
   return (
     <div className="space-y-6 p-6">
@@ -468,6 +477,24 @@ export function DashboardPage() {
         )}
       </div>
 
+      <div className="flex flex-wrap gap-4 text-sm">
+        <a className="glass-btn-primary" href="/enterprise/procurement">
+          发起受控报价
+        </a>
+        <a className="glass-btn-secondary" href="/enterprise/tasks">
+          查看采购任务
+        </a>
+        <a className="glass-btn-secondary" href="/enterprise/human-reviews">
+          人工核验
+        </a>
+        <button
+          className="glass-btn-secondary"
+          disabled={loading}
+          onClick={() => setRefreshVersion((n) => n + 1)}
+        >
+          刷新
+        </button>
+      </div>
       {error && (
         <div
           role="alert"

@@ -1,12 +1,20 @@
 # 项目进度
 
-> 最后更新：2026-10-02 +08:00
+> 最后更新：2026-10-12 +08:00
 >
 > 本文件是当前目标、活动任务、最新证据、阻塞和下一步的唯一事实源。能力映射与版本二开发差距见 `docs/procurement_completion_gap.md`，历史阶段契约见 `docs/procurement_rpa_development_guide.md`，重大取舍见 `DECISIONS.md`。
 
 ## 当前目标
 
-当前活动任务：无。`REVIEW-FIX-01` 已完成四项 review 修复及相关本地回归，直接证据见文末。以下为本轮已关闭范围；不自动领取其他任务。
+当前活动任务：无。`FRONTEND-01` 五阶段受控采购工作台已完成本轮工程验收；直接证据与未验证边界见文末。不自动扩展生产化或历史路线任务。
+
+- 完成定义：中文浅色采购闭环，刷新后可追踪任务、审批、核验、比价和模板实例，并追溯受权证据与审计。
+- 批准范围：skyvern-frontend 相关页面、路由、认证、样式和测试；enterprise/procurement/routes.py 受权只读关联字段与专项测试；PROGRESS.md，必要时 DECISIONS.md。
+- 范围外：新依赖、业务规则/表/迁移、真实凭据/provider/供应商、生产或外部写入、commit/push/分支/部署。
+- 最小验证：相关 Vitest、TypeScript、构建、修改文件 lint、关联权限回归、合成接口浏览器走查、git diff --check。
+- 开工直接观察：Windows PowerShell；工作区干净。逐阶段记录证据，全部验收或明确外部边界后停止。
+
+以下为已关闭 REVIEW-FIX-01 范围，直接证据见文末。
 
 - 完成定义：凭据输入同时校验顶层页面与目标 frame；企业浏览器上下文不采集本地 HAR/录像/控制台正文；Unicode JSON 转义不能绕过已知凭据掩码；非法表格抽取不被原生 filler 补成成功空结果。
 - 范围：对应凭据输入、浏览器创建、掩码、Skill schema 及针对性测试和本文；保留开工前全部未提交修改。
@@ -482,3 +490,77 @@
 - 本次直接检查：暂存区起始为空，候选清单 78 个文件；64 个 Python 文件 AST 语法检查通过，git diff --check 通过。Windows PowerShell / Python 3.12.4。
 - 验证来源：相关 67 项测试与 Ruff 通过属于同一会话上一修复轮的直接证据，本提交轮未重新运行测试；不把阶段 1～5 的历史记录声明为本轮全量回归。
 - 保留边界：真实浏览器、数据库/外部服务联调及历史敏感文件清理仍未执行；提交结果和提交 ID 以 Git 历史及本次最终汇报为准。
+
+
+## FRONTEND-01 阶段 1 直接证据
+- Windows PowerShell + Node/Vitest：入口与角色、组织失败重试、退出缓存 3 passed；tsc --noEmit 通过。
+- 默认 Vitest 配置缓存写入失败；使用本轮临时 ESM runner 配置与独立缓存运行，无安装依赖。视觉统一与入口已实现，浏览器走查留到阶段 5。
+- 阶段 1 停止条件达到，开始已授权阶段 2。
+
+## FRONTEND-01 阶段 2 直接证据
+- 任务详情/比价恢复/拒绝读取 3 passed；原工作台 5 passed；Python 3.12.4 + 既有 .venv 包，关联权限和任务隔离 10 passed。dotenv 和自动插件禁用，无外部调用。
+- 报价重试保留幂等键与成功结果；独立失败不阻止另一供应商。只读关联端点复用既有权限，原内部任务读取不增加查询。阶段 2 完成，进入已授权阶段 3。
+
+## FRONTEND-01 阶段 3 直接证据
+- 审批/人工核验与任务组合 6 passed；覆盖大额十进制原样提交、422、跳过不生成报价、批准不自动 continue；TypeScript 通过。
+- 审批和核验路由仅复用既有写接口，无规则或状态机修改。阶段 3 完成，进入已授权阶段 4。
+
+## FRONTEND-01 阶段 4 直接证据
+- 模板目录/幂等/恢复终止/实例直链与409 4 passed；采购页面含审计服务端分页筛选 7 passed；Dashboard 4 passed。TypeScript 通过。
+- 保留成本 unknown 与缓存 restricted/unavailable；审计不再把单条事件当作任务终态。阶段 4 完成，进入阶段 5 构建、lint 与浏览器走查。
+
+
+## 2026-10-03 FRONTEND-01 最终交付证据（本次直接观察）
+
+- 来源与修订：用户明确授权实施五阶段计划，并再次要求继续。基于 `67086cae7beb4ab067258f8b1c82da3742d8ce29` 的干净工作区；未 commit/push/切换分支/部署，未安装依赖。
+- 结果：浅色采购导航、角色首页、登录组织失败重试、会话过期与缓存隔离；采购任务列表/详情、URL 比价选择、受权关联 ID、人工核验、审批详情与手动继续；模板实例直链刷新与版本冲突禁用；审计服务端筛选/分页及 Dashboard 追溯。金额保持十进制字符串，排名/采购决定仍由服务端确定；真实执行边界仍是开发环境及 controlled_demo。
+- 最终前端：Windows PowerShell、Node 25.7.0、Vitest 3.2.4 + happy-dom，6 文件 **35 passed**（入口/会话4、采购页面7、采集6、模板4、Dashboard4、状态徽标10）。覆盖失败重试同幂等键、成功供应商不重复提交、URL 恢复、权限拒绝、409刷新、人工金额原值/422、跳过无报价、批准无自动continue、模板恢复终止与审计分页。React Router future flags 与 Node webstorage 有既有提示，不影响通过。
+- 最终后端：Python 3.12.4 + 既有 .venv/Lib/site-packages；禁 dotenv、Pydantic dotenv 与 pytest 自动插件，显式 pytest_asyncio。运行 `test_frontend_task_links.py`、`test_day_4_procurement_isolation.py`、`test_s1_human_reviews.py`：**16 passed / 24 warnings**。查询权限使用真实路由/权限规则和 SQL 编译，数据库边界为合成替身，未运行 PostgreSQL 集成。
+- 静态与构建：`tsc --noEmit`、所有修改 TS/TSX 的 ESLint（max-warnings=0）、2 个修改 Python 文件 Ruff、git diff --check 通过。使用 Vite 5.4.21 生产 build API、现有 React 插件和别名完成构建（1973 modules）；临时空 envDir 与本地合成 API 地址隔离 .env，未读取真实凭据，未执行默认含环境文件加载的 npm build 包装命令。
+- 浏览器：现有 Playwright + Chromium，生产构建由临时 127.0.0.1:28123 静态服务提供；API 全部为受控合成响应，所有外域请求阻断。**11 项走查通过**，包括 Dashboard、URL 比价刷新、跳过核验、审批无自动继续、实例刷新/恢复、审计分页、390px导航开关与跳转、审批角色首页与越权页面；page_errors=[]、unexpected_api=[]、窄屏页面无横向溢出。1440px桌面与390px截图已人工查看。
+- 过程修复：默认 Vitest 缓存位置被拒，改用本轮临时 ESM runner 和独立缓存；Windows CRLF 导致首次只读关联插入未命中，新增测试暴露后已修复并通过最终组合。修复走查发现的 Logo 裁切、窄屏间距、分页换行与导航可访问性。
+- 未验证：真实 PostgreSQL 联调、真实供应商/模型/凭据/浏览器采购动作、生产环境、全部仓库测试与全量 lint 未运行；不能将合成 API 浏览器走查作为真实业务成功率。
+- 保留债务：任务/报价/核验列表仍在已授权返回结果内前端分页；模板实例历史列表未新增；完整应用的既有大 JS chunk（约4.28MB和8.62MB，未压缩）及 Browserslist/模糊 delay class 构建警告保留。新增采购页面中文优先，既有语言切换与既有英文文案保留。
+- 清理与停止：本轮临时测试脚本、ESM配置、缓存、隔离构建目录和空环境目录已删除；本地静态服务/浏览器已关闭，截图保留在 Codex visualizations 目录。五阶段工程验收达到，关闭活动任务；不扩展供应商管理/订单/合同/权限平台。
+
+### 本轮修改文件（29）
+
+- `PROGRESS.md`
+- `enterprise/procurement/routes.py`
+- `skyvern-frontend/src/__tests__/ProcurementWorkbenchPage.test.tsx`
+- `skyvern-frontend/src/__tests__/WorkflowTemplatesPage.test.tsx`
+- `skyvern-frontend/src/components/Logo.tsx`
+- `skyvern-frontend/src/components/enterprise/EnterpriseSideNav.tsx`
+- `skyvern-frontend/src/components/enterprise/StatusBadge.tsx`
+- `skyvern-frontend/src/index.css`
+- `skyvern-frontend/src/router.tsx`
+- `skyvern-frontend/src/routes/auth/LoginPage.tsx`
+- `skyvern-frontend/src/routes/enterprise/approvals/ApprovalsPage.tsx`
+- `skyvern-frontend/src/routes/enterprise/audit/AuditLogsPage.tsx`
+- `skyvern-frontend/src/routes/enterprise/dashboard/DashboardPage.tsx`
+- `skyvern-frontend/src/routes/enterprise/procurement/ProcurementWorkbenchPage.tsx`
+- `skyvern-frontend/src/routes/enterprise/workflows/WorkflowTemplatesPage.tsx`
+- `skyvern-frontend/src/routes/root/Header.tsx`
+- `skyvern-frontend/src/routes/root/NavigationHamburgerMenu.tsx`
+- `skyvern-frontend/src/routes/root/RootLayout.tsx`
+- `skyvern-frontend/src/routes/root/SidebarContent.tsx`
+- `skyvern-frontend/src/store/AuthStore.ts`
+- `skyvern-frontend/src/styles/variables.css`
+- `skyvern-frontend/src/util/authFetch.ts`
+- `skyvern-frontend/src/__tests__/EnterpriseAccess.test.tsx`
+- `skyvern-frontend/src/__tests__/ProcurementPages.test.tsx`
+- `skyvern-frontend/src/routes/enterprise/EnterpriseAccess.tsx`
+- `skyvern-frontend/src/routes/enterprise/procurement/HumanReviewsPage.tsx`
+- `skyvern-frontend/src/routes/enterprise/procurement/ProcurementTasksPage.tsx`
+- `skyvern-frontend/src/routes/enterprise/shared.ts`
+- `tests/unit/test_frontend_task_links.py`
+
+
+## 2026-10-12：全部本地提交授权与验证
+
+- 授权：用户在工作区与 GitHub 差异检查后明确要求“全部提交”；本轮范围为现有 29 个未提交文件（22 个修改、7 个新增），另在本文补记授权和证据。不包含 push、历史重写、分支切换、部署或外部写入。
+- 完成定义与停止条件：这 29 个文件形成一次可追溯本地提交，核对暂存文件边界、提交文件数、HEAD 和工作区后停止；不追加业务实现或领取其他任务。
+- 开工直接观察：Windows PowerShell，HEAD 为 `67086cae7beb4ab067258f8b1c82da3742d8ce29`，暂存区为空；文件清单与上一轮只读检查及上方 FRONTEND-01 的 29 文件清单一致。
+- 本次直接验证：Node 25.7.0 使用已安装 TypeScript 执行 `node node_modules/typescript/bin/tsc --noEmit --incremental false`，退出码 0；Python 3.12.4 使用 `-I -S` 和标准库 AST 解析 `enterprise/procurement/routes.py`、`tests/unit/test_frontend_task_links.py`，2 文件语法通过；工作区及暂存区 `git diff --check` 通过，暂存清单精确匹配 29 个候选文件，无遗漏的未暂存或未跟踪文件。未导入应用或读取环境文件，未安装依赖。
+- 验证来源：上方 2026-10-03 的 Vitest、后端回归、构建和合成 API 浏览器走查为历史记录，本提交轮未重新运行，不声明为本次回归结果。暂存区检查、提交结果与提交 ID 以本轮 Git 输出和最终汇报为准。
+- 保留边界：FRONTEND-01 的前端分页、模板实例历史列表、大 JS chunk 和构建警告债务继续保留；真实 PostgreSQL、供应商、模型、凭据、生产环境及全量应用回归未验证。本地与 GitHub main 没有共同祖先，历史对齐与推送需独立授权，本轮不处理。

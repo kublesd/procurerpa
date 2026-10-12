@@ -1,7 +1,7 @@
 import { Toaster } from "@/components/ui/toaster";
 import { useSidebarStore } from "@/store/SidebarStore";
 import { cn } from "@/util/utils";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
 import { useDebugStore } from "@/store/useDebugStore";
@@ -9,6 +9,7 @@ import { GlobalNotificationListener } from "@/components/GlobalNotificationListe
 import { SelfHealApiKeyBanner } from "@/components/SelfHealApiKeyBanner";
 
 function RootLayout() {
+  const enterprise = useLocation().pathname.startsWith("/enterprise");
   const collapsed = useSidebarStore((state) => state.collapsed);
   const embed = new URLSearchParams(window.location.search).get("embed");
   const isEmbedded = embed === "true";
@@ -21,11 +22,11 @@ function RootLayout() {
   });
 
   return (
-    <div className="glass-page">
+    <div className={cn("glass-page", enterprise && "enterprise-shell")}>
       {!isEmbedded && <Sidebar />}
       <div className="h-full w-full">
         <div className={horizontalPadding}>
-          <SelfHealApiKeyBanner />
+          {!enterprise && <SelfHealApiKeyBanner />}
           <GlobalNotificationListener />
         </div>
         <Header />

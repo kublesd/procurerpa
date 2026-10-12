@@ -22,7 +22,7 @@ function SidebarContent({ useCollapsedState }: Props) {
           {collapsed ? <LogoMinimized /> : <Logo />}
         </div>
       </Link>
-      <EnterpriseSideNav />
+      <EnterpriseSideNav collapsed={collapsed} />
       <div
         className={cn("mt-auto flex min-h-12", {
           "justify-center": collapsed,
@@ -30,6 +30,8 @@ function SidebarContent({ useCollapsedState }: Props) {
         })}
       >
         <Button
+          className="hidden lg:inline-flex"
+          aria-label={collapsed ? "展开导航" : "折叠导航"}
           size="icon"
           variant="ghost"
           onClick={() => {

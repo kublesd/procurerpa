@@ -161,7 +161,6 @@ async def list_procurement_tasks(user: CurrentUser) -> dict:
     return {"tasks": [_task_response(extension, task) for extension, task in rows], "total": len(rows)}
 
 
-@router.get("/tasks/{task_id}")
 async def get_procurement_task(task_id: str, user: CurrentUser) -> dict:
     """Return a task only after its procurement scope has been enforced."""
     query = filter_task_extensions(
@@ -179,6 +178,31 @@ async def get_procurement_task(task_id: str, user: CurrentUser) -> dict:
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Procurement task not found")
     return _task_response(*row)
+
+
+@router.get("/tasks/{task_id}")
+async def procurement_task_detail(task_id: str, user: CurrentUser) -> dict:
+    """Expose only associations the caller can open; internal task reads stay unchanged."""
+    from enterprise.approval.routes import _user_can_approve
+
+    result = await get_procurement_task(task_id, user)
+    result.update(approval_id=None, review_id=None)
+    async with forge_app.DATABASE.Session() as session:
+        approvals = (await session.scalars(select(ApprovalRequestModel).where(
+            ApprovalRequestModel.task_id == task_id,
+            ApprovalRequestModel.organization_id == user.org_id,
+        ).order_by(ApprovalRequestModel.requested_at.desc()))).all()
+        for approval in approvals:
+            if approval.requester_user_id == user.user_id or _user_can_approve(user, approval, result["category_id"]):
+                result["approval_id"] = approval.approval_id
+                break
+        if user.is_any_operator:
+            review = await session.scalar(_human_review_query(user).where(
+                ProcurementHumanReviewModel.task_id == task_id,
+            ).order_by(ProcurementHumanReviewModel.created_at.desc()).limit(1))
+            if review is not None:
+                result["review_id"] = review.review_id
+    return result
 
 
 class QuoteCreateRequest(BaseModel):

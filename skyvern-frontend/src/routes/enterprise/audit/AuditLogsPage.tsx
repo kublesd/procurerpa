@@ -1,241 +1,193 @@
-import { useEffect, useState } from "react";
+import { useState, type FormEvent } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { GlassCard } from "@/components/enterprise/GlassCard";
-import { StatusBadge } from "@/components/enterprise/StatusBadge";
-import { Timeline, type TimelineItem } from "@/components/enterprise/Timeline";
 import { ScreenshotDiff } from "@/components/enterprise/ScreenshotDiff";
-import { Icon } from "@/components/Icon";
-import { useI18n } from "@/i18n/useI18n";
-import { authFetch } from "@/util/authFetch";
-
-type AuditLogEntry = {
+import { useEnterpriseQuery } from "../shared";
+import { Pagination, QueryFeedback } from "../EnterpriseAccess";
+type Audit = {
   audit_log_id: string;
   task_id: string;
-  action_index: number;
   action_type: string;
-  target_element: string | null;
+  execution_result: string;
+  executor: string;
+  created_at: string;
   input_value: string | null;
-  page_url: string | null;
+  error_message: string | null;
   screenshot_before_url: string | null;
   screenshot_after_url: string | null;
-  duration_ms: number | null;
-  executor: string;
-  execution_result: string;
-  error_message: string | null;
-  has_approval: boolean;
-  created_at: string;
 };
-
-type TaskGroup = {
-  task_id: string;
-  logs: AuditLogEntry[];
-};
-
-type AuditLogResponse = {
-  items: AuditLogEntry[];
-  total: number;
-  page: number;
-  page_size: number;
-};
-
-async function responseError(response: Response): Promise<Error> {
-  try {
-    const body = await response.json();
-    if (typeof body.detail === "string") return new Error(body.detail);
-  } catch {
-    // Use the HTTP status below when the response is not JSON.
-  }
-  return new Error(`HTTP ${response.status}`);
+function localDate(value: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? ""
+    : new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+        .toISOString()
+        .slice(0, 16);
 }
-
-function groupByTask(logs: AuditLogEntry[]): TaskGroup[] {
-  const groups = new Map<string, AuditLogEntry[]>();
-  for (const log of logs)
-    groups.set(log.task_id, [...(groups.get(log.task_id) ?? []), log]);
-  return Array.from(groups, ([task_id, groupedLogs]) => ({
-    task_id,
-    logs: groupedLogs,
-  }));
-}
-
-function LogTimelineItem({
-  log,
-  expanded,
-  onToggle,
-}: {
-  log: AuditLogEntry;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const timelineItem: TimelineItem = {
-    id: log.audit_log_id,
-    title: `#${log.action_index} ${log.action_type}`,
-    description: `${log.target_element ?? ""}${log.input_value ? ` → ${log.input_value}` : ""}${log.duration_ms != null ? ` (${log.duration_ms}ms)` : ""}`,
-    timestamp: new Date(log.created_at).toLocaleTimeString(),
-    status: log.execution_result === "success" ? "success" : "error",
-  };
-
-  return (
-    <div>
-      <div className="cursor-pointer" onClick={onToggle}>
-        <Timeline items={[timelineItem]} />
-      </div>
-      {expanded && (log.screenshot_before_url || log.screenshot_after_url) && (
-        <div className="ml-12 mt-2">
-          <ScreenshotDiff
-            beforeUrl={log.screenshot_before_url ?? undefined}
-            afterUrl={log.screenshot_after_url ?? undefined}
-          />
-        </div>
-      )}
-      {expanded && log.error_message && (
-        <div className="ml-12 mt-2 rounded-lg bg-red-50 p-3 text-sm text-red-700">
-          {log.error_message}
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function AuditLogsPage() {
-  const { t } = useI18n();
-  const [logs, setLogs] = useState<AuditLogEntry[]>([]);
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
-  const [filterType, setFilterType] = useState("all");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    authFetch("/api/v1/enterprise/audit/logs")
-      .then(async (response) => {
-        if (!response.ok) throw await responseError(response);
-        return response.json() as Promise<AuditLogResponse>;
-      })
-      .then((data) => {
-        if (active) setLogs(data.items);
-      })
-      .catch((reason: unknown) => {
-        if (!active) return;
-        setLogs([]);
-        setError(
-          reason instanceof Error ? reason.message : t("audit.loadError"),
+  const [params, setParams] = useSearchParams();
+  const page = Math.max(1, Number(params.get("page")) || 1);
+  const [filterError, setFilterError] = useState("");
+  const queryParams = new URLSearchParams(params);
+  queryParams.set("page", String(page));
+  queryParams.set("page_size", "20");
+  const query = useEnterpriseQuery<{ items: Audit[]; total: number }>(
+    "/audit/logs?" + queryParams,
+  );
+  function filter(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setFilterError("");
+    const values = new FormData(event.currentTarget);
+    const next = new URLSearchParams();
+    for (const [name, value] of values)
+      if (String(value).trim())
+        next.set(
+          name,
+          name.endsWith("_time")
+            ? new Date(String(value)).toISOString()
+            : String(value).trim(),
         );
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [t]);
-
-  const filteredLogs =
-    filterType === "all"
-      ? logs
-      : logs.filter((log) => log.action_type === filterType);
-  const groups = groupByTask(filteredLogs);
-  const actionTypes = [...new Set(logs.map((log) => log.action_type))];
-
-  function toggleExpand(id: string) {
-    setExpandedIds((previous) => {
-      const next = new Set(previous);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+    if (
+      next.get("start_time") &&
+      next.get("end_time") &&
+      next.get("start_time")! > next.get("end_time")!
+    ) {
+      setFilterError("开始时间不能晚于结束时间");
+      return;
+    }
+    setParams(next);
   }
-
   return (
-    <div className="space-y-6 p-6">
+    <div className="space-y-6 p-4 md:p-6">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Icon name="audit" size={24} color="var(--procurerpa-blue)" />
-          <h1
-            className="text-xl font-bold"
-            style={{ color: "var(--procurerpa-blue)" }}
-          >
-            {t("audit.title")}
-          </h1>
-        </div>
-        <div className="flex items-center gap-3">
-          <Icon name="filter" size={16} color="var(--procurerpa-text-muted)" />
-          <select
-            className="glass-input text-sm"
-            value={filterType}
-            onChange={(event) => setFilterType(event.target.value)}
-          >
-            <option value="all">{t("audit.allTypes")}</option>
-            {actionTypes.map((actionType) => (
-              <option key={actionType} value={actionType}>
-                {actionType}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {error && (
-        <div
-          role="alert"
-          className="rounded-lg bg-red-50 p-3 text-sm text-red-700"
+        <h1 className="text-2xl font-semibold">审计追溯</h1>
+        <button
+          className="glass-btn-secondary"
+          onClick={() => void query.refetch()}
         >
-          {error}
-        </div>
-      )}
-      {loading && (
-        <p className="text-sm" style={{ color: "var(--procurerpa-text-muted)" }}>
-          {t("audit.loading")}
-        </p>
-      )}
-      {!loading && !error && groups.length === 0 && (
-        <GlassCard hoverable={false} padding="lg">
-          <p
-            className="py-10 text-center text-sm"
-            style={{ color: "var(--procurerpa-text-muted)" }}
-          >
-            {t("audit.noData")}
-          </p>
-        </GlassCard>
-      )}
-
-      {!loading &&
-        !error &&
-        groups.map((group) => (
-          <GlassCard key={group.task_id} hoverable={false} padding="md">
-            <div className="mb-4 flex items-center gap-3">
-              <Icon name="task" size={20} color="var(--procurerpa-blue)" />
-              <h3
-                className="text-sm font-semibold"
-                style={{ color: "var(--procurerpa-text-primary)" }}
-              >
-                {t("audit.task")}: {group.task_id}
-              </h3>
-              <StatusBadge
-                status={
-                  group.logs.some((log) => log.execution_result !== "success")
-                    ? "failed"
-                    : "completed"
-                }
+          刷新
+        </button>
+      </div>
+      <GlassCard hoverable={false}>
+        <form
+          key={params.toString()}
+          onSubmit={filter}
+          className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"
+        >
+          {[
+            ["task_id", "任务 ID"],
+            ["action_type", "动作类型"],
+            ["executor", "执行人"],
+          ].map(([name, label]) => (
+            <label key={name} className="text-sm">
+              {label}
+              <input
+                className="glass-input mt-1 w-full"
+                name={name}
+                defaultValue={params.get(name!) ?? ""}
               />
-              <span
-                className="text-xs"
-                style={{ color: "var(--procurerpa-text-muted)" }}
-              >
-                {t("audit.actionCount", { count: group.logs.length })}
-              </span>
-            </div>
-            <div className="space-y-2">
-              {group.logs.map((log) => (
-                <LogTimelineItem
-                  key={log.audit_log_id}
-                  log={log}
-                  expanded={expandedIds.has(log.audit_log_id)}
-                  onToggle={() => toggleExpand(log.audit_log_id)}
-                />
-              ))}
-            </div>
-          </GlassCard>
-        ))}
+            </label>
+          ))}
+          {[
+            ["start_time", "开始时间"],
+            ["end_time", "结束时间"],
+          ].map(([name, label]) => (
+            <label key={name} className="text-sm">
+              {label}
+              <input
+                className="glass-input mt-1 w-full"
+                name={name}
+                type="datetime-local"
+                defaultValue={localDate(params.get(name!))}
+              />
+            </label>
+          ))}
+          <div className="flex items-end gap-3">
+            <button type="submit" className="glass-btn-primary">
+              筛选
+            </button>
+            <button
+              type="button"
+              className="glass-btn-secondary"
+              onClick={() => {
+                setParams({});
+                setFilterError("");
+              }}
+            >
+              清空
+            </button>
+          </div>
+        </form>
+        {filterError && <p role="alert">{filterError}</p>}
+      </GlassCard>
+      <QueryFeedback
+        loading={query.isPending}
+        error={query.error}
+        retry={() => void query.refetch()}
+      />
+      {!query.error && query.data && (
+        <>
+          <p className="text-sm text-slate-500">
+            仅展示当前授权范围内的持久审计。事件结果不等于整个任务的最终状态。
+          </p>
+          {query.data.items.map((log) => (
+            <GlassCard key={log.audit_log_id} hoverable={false}>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <Link
+                    className="text-blue-700 underline"
+                    to={"/enterprise/tasks/" + encodeURIComponent(log.task_id)}
+                  >
+                    {log.task_id}
+                  </Link>
+                  <p className="mt-2 font-medium">
+                    {log.action_type} · {log.execution_result}
+                  </p>
+                </div>
+                <p className="text-xs text-slate-500">
+                  {new Date(log.created_at).toLocaleString()} · {log.executor}
+                </p>
+              </div>
+              <details className="mt-3">
+                <summary className="cursor-pointer text-sm text-blue-700">
+                  查看安全记录与证据
+                </summary>
+                {log.input_value && (
+                  <pre className="my-3 whitespace-pre-wrap break-all rounded bg-slate-50 p-3 text-xs">
+                    {log.input_value}
+                  </pre>
+                )}
+                {log.error_message && (
+                  <p className="text-sm text-red-700">{log.error_message}</p>
+                )}
+                {log.screenshot_before_url || log.screenshot_after_url ? (
+                  <ScreenshotDiff
+                    beforeUrl={log.screenshot_before_url ?? undefined}
+                    afterUrl={log.screenshot_after_url ?? undefined}
+                  />
+                ) : (
+                  <p className="mt-2 text-sm text-slate-500">
+                    无可展示截图；可能未留存、受安全策略限制或证据服务不可用。
+                  </p>
+                )}
+              </details>
+            </GlassCard>
+          ))}
+          {!query.data.items.length && (
+            <GlassCard hoverable={false}>暂无符合条件的审计记录</GlassCard>
+          )}
+          <Pagination
+            page={page}
+            total={query.data.total}
+            onChange={(p) => {
+              const next = new URLSearchParams(params);
+              next.set("page", String(p));
+              setParams(next);
+            }}
+          />
+        </>
+      )}
     </div>
   );
 }

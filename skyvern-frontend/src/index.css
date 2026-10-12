@@ -127,3 +127,41 @@ body,
   -moz-user-select: none !important;
   -ms-user-select: none !important;
 }
+
+/* Procurement forms and tables share accessible, compact defaults. */
+.glass-page {
+  overflow-wrap: anywhere;
+}
+.glass-page button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.glass-page :focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 3px;
+}
+.enterprise-table {
+  width: 100%;
+  min-width: 640px;
+  text-align: left;
+  font-size: 14px;
+}
+.enterprise-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 600;
+}
+.enterprise-table th,
+.enterprise-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.enterprise-table a {
+  color: #1d4ed8;
+  text-decoration: underline;
+}
+
+.enterprise-shell .container {
+  padding-left: 0;
+  padding-right: 0;
+}

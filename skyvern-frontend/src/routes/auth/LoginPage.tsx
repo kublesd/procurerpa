@@ -26,10 +26,17 @@ export function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  const [orgAttempt, setOrgAttempt] = useState(0);
+  const [orgLoading, setOrgLoading] = useState(true);
+  const [orgError, setOrgError] = useState(false);
   useEffect(() => {
+    const controller = new AbortController();
+    setOrgLoading(true);
+    setOrgError(false);
     axios
-      .get<OrgOption[]>(orgsEndpoint)
+      .get<OrgOption[]>(orgsEndpoint, { signal: controller.signal })
       .then(({ data }) => {
+        if (controller.signal.aborted) return;
         setOrganizations(data);
         const first = data[0];
         if (first) {
@@ -37,16 +44,20 @@ export function LoginPage() {
         }
       })
       .catch(() => {
-        // Fallback if API unavailable
-        setOrganizations([
-          { organization_id: "锐智金融", organization_name: "锐智金融科技" },
-        ]);
-        setOrganizationId("锐智金融");
+        if (controller.signal.aborted) return;
+        setOrganizations([]);
+        setOrganizationId("");
+        setOrgError(true);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setOrgLoading(false);
       });
-  }, []);
+    return () => controller.abort();
+  }, [orgAttempt]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
+    if (loading || orgLoading || !organizationId) return;
     setError("");
     setLoading(true);
 
@@ -174,12 +185,32 @@ export function LoginPage() {
           </div>
         )}
 
+        {orgLoading && <p role="status">正在加载组织…</p>}
+        {orgError && (
+          <p role="alert">
+            无法加载组织。
+            <button
+              type="button"
+              className="underline"
+              onClick={() => setOrgAttempt((n) => n + 1)}
+            >
+              重试
+            </button>
+          </p>
+        )}
+        {!orgLoading && !orgError && !organizations.length && (
+          <p role="status">暂无可登录组织</p>
+        )}
         {/* Form */}
         <form onSubmit={handleSubmit}>
           <div style={{ marginBottom: "var(--space-md)" }}>
             <Label
               htmlFor="organizationId"
-              style={{ color: "var(--procurerpa-text-secondary)", marginBottom: 6, display: "block" }}
+              style={{
+                color: "var(--procurerpa-text-secondary)",
+                marginBottom: 6,
+                display: "block",
+              }}
             >
               {t("auth.organizationId")}
             </Label>
@@ -188,7 +219,11 @@ export function LoginPage() {
               value={organizationId}
               onChange={(e) => setOrganizationId(e.target.value)}
               className="glass-input"
-              style={{ width: "100%", height: 40, borderRadius: "var(--radius-sm)" }}
+              style={{
+                width: "100%",
+                height: 40,
+                borderRadius: "var(--radius-sm)",
+              }}
               required
             >
               {organizations.map((org) => (
@@ -202,7 +237,11 @@ export function LoginPage() {
           <div style={{ marginBottom: "var(--space-md)" }}>
             <Label
               htmlFor="username"
-              style={{ color: "var(--procurerpa-text-secondary)", marginBottom: 6, display: "block" }}
+              style={{
+                color: "var(--procurerpa-text-secondary)",
+                marginBottom: 6,
+                display: "block",
+              }}
             >
               {t("auth.username")}
             </Label>
@@ -222,7 +261,11 @@ export function LoginPage() {
           <div style={{ marginBottom: "var(--space-lg)" }}>
             <Label
               htmlFor="password"
-              style={{ color: "var(--procurerpa-text-secondary)", marginBottom: 6, display: "block" }}
+              style={{
+                color: "var(--procurerpa-text-secondary)",
+                marginBottom: 6,
+                display: "block",
+              }}
             >
               {t("auth.password")}
             </Label>
@@ -240,7 +283,7 @@ export function LoginPage() {
 
           <Button
             type="submit"
-            disabled={loading}
+            disabled={loading || orgLoading || !organizationId}
             className="glass-btn-primary"
             style={{
               width: "100%",

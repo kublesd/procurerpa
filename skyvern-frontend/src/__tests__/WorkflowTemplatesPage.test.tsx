@@ -1,7 +1,16 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render as renderBase,
+  screen,
+} from "@testing-library/react";
 import { WorkflowTemplatesPage } from "@/routes/enterprise/workflows/WorkflowTemplatesPage";
 import { authFetch } from "@/util/authFetch";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
+function render(element: React.ReactNode) {
+  return renderBase(<MemoryRouter>{element}</MemoryRouter>);
+}
 vi.mock("@/util/authFetch", () => ({ authFetch: vi.fn() }));
 afterEach(() => {
   cleanup();
@@ -158,4 +167,52 @@ it("recovers and terminates using the latest instance version", async () => {
   expect(actions[0]?.path).toMatch(/recover$/);
   expect(actions[1]?.path).toMatch(/terminate$/);
   expect(screen.queryByText("终止实例")).toBeNull();
+});
+
+it("opens a persisted instance URL and requires refresh after a version conflict", async () => {
+  let version = 7;
+  let writes = 0;
+  vi.mocked(authFetch).mockImplementation(async (input, init) => {
+    expect(String(input)).toContain("/instances/instance-demo");
+    if (init?.method === "POST") {
+      writes++;
+      version = 8;
+      return { ok: false, status: 409, json: async () => ({}) } as Response;
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        instance_id: "instance-demo",
+        status: "running",
+        version,
+        steps: [],
+      }),
+    } as Response;
+  });
+  renderBase(
+    <MemoryRouter
+      initialEntries={["/enterprise/templates/instances/instance-demo"]}
+    >
+      <Routes>
+        <Route
+          path="/enterprise/templates/instances/:instanceId"
+          element={<WorkflowTemplatesPage />}
+        />
+      </Routes>
+    </MemoryRouter>,
+  );
+  await screen.findByText(/版本：7/);
+  fireEvent.click(screen.getByRole("button", { name: "转人工检查" }));
+  await screen.findByRole("alert");
+  expect(
+    (screen.getByRole("button", { name: "转人工检查" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(writes).toBe(1);
+  fireEvent.click(screen.getByRole("button", { name: "刷新状态" }));
+  await screen.findByText(/版本：8/);
+  expect(
+    (screen.getByRole("button", { name: "转人工检查" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
 });

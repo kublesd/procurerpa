@@ -256,3 +256,69 @@ describe("ProcurementWorkbenchPage", () => {
     },
   );
 });
+
+it("keeps successful quotes and reuses the failed supplier idempotency key", async () => {
+  let keyIndex = 0;
+  vi.stubGlobal("crypto", { randomUUID: () => `attempt-${++keyIndex}` });
+  const alphaKeys: string[] = [];
+  let betaCalls = 0;
+  vi.mocked(authFetch).mockImplementation(async (input, init) => {
+    const path = String(input);
+    if (path.endsWith("/auth/me")) return jsonResponse({ org_id: "org-demo" });
+    if (path.endsWith("/context-options"))
+      return jsonResponse({
+        departments: [{ department_id: "dept-demo", name: "Demo", code: "D" }],
+        categories: [{ category_id: "cat-demo", name: "Demo", code: "C" }],
+      });
+    if (path.endsWith("/quote-task")) {
+      const alpha = String(init?.body).includes("vendor-a");
+      if (alpha) {
+        alphaKeys.push(new Headers(init?.headers).get("Idempotency-Key")!);
+        if (alphaKeys.length === 1) throw new Error("synthetic lost response");
+      } else betaCalls++;
+      const suffix = alpha ? "alpha" : "beta";
+      return jsonResponse({
+        task_id: `task-${suffix}`,
+        task_status: "completed",
+        outcome: "completed",
+        approval_id: null,
+        quote_id: `quote-${suffix}`,
+        artifact_id: `artifact-${suffix}`,
+      });
+    }
+    if (path.includes("/quotes/compare?"))
+      return jsonResponse({
+        task_ids: ["task-alpha", "task-beta"],
+        quotes: [],
+        recommended_quote_id: null,
+        recommendation_reason: "synthetic rule",
+      });
+    return jsonResponse({
+      quotes: [quote(path.includes("alpha") ? "alpha" : "beta")],
+      total: 1,
+    });
+  });
+  render(<ProcurementWorkbenchPage />);
+  const start = await screen.findByRole("button", { name: "开始采集报价" });
+  await waitFor(() =>
+    expect((start as HTMLButtonElement).disabled).toBe(false),
+  );
+  fireEvent.click(start);
+  await waitFor(() =>
+    expect(screen.getAllByText(/artifact-beta/).length).toBeGreaterThan(0),
+  );
+  await waitFor(() =>
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "开始采集报价",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "开始采集报价" }));
+  await screen.findByText(/synthetic rule/);
+  expect(alphaKeys).toHaveLength(2);
+  expect(alphaKeys[0]).toBe(alphaKeys[1]);
+  expect(betaCalls).toBe(1);
+});

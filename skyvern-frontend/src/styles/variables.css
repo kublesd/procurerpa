@@ -5,36 +5,37 @@
 
 :root {
   /* === Primary Colors === */
-  --procurerpa-blue: #1A3A5C;
-  --procurerpa-blue-light: #2A5A8C;
-  --procurerpa-blue-dark: #0F2440;
-  --procurerpa-gold: #C9A84C;
-  --procurerpa-gold-light: #DFC474;
-  --procurerpa-gold-dark: #A68A30;
+  --procurerpa-blue: #1d4ed8;
+  --procurerpa-blue-light: #2a5a8c;
+  --procurerpa-blue-dark: #0f2440;
+  --procurerpa-gold: #c9a84c;
+  --procurerpa-gold-light: #dfc474;
+  --procurerpa-gold-dark: #a68a30;
 
   /* === Background === */
-  --procurerpa-bg: #EFF1F5;
-  --procurerpa-bg-alt: #E8EBF0;
+  --procurerpa-bg: #eff1f5;
+  --procurerpa-bg-alt: #e8ebf0;
 
   /* === Text — blue-tinted grays for warmth, high contrast === */
-  --procurerpa-text-primary: #1A1D2E;
+  --procurerpa-text-primary: #1a1d2e;
   --procurerpa-text-secondary: #374155;
   --procurerpa-text-muted: #526077;
-  --procurerpa-text-white: #FFFFFF;
+  --procurerpa-text-white: #ffffff;
 
   /* === Glass Properties === */
-  --glass-bg: rgba(255, 255, 255, 0.82);
+  --glass-bg: #ffffff;
   --glass-bg-hover: rgba(255, 255, 255, 0.92);
   --glass-border: rgba(26, 58, 92, 0.13);
-  --glass-blur: 14px;
-  --glass-shadow: 0 4px 24px rgba(0, 0, 0, 0.08);
+  --glass-blur: 0px;
+  --glass-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
   --glass-shadow-hover: 0 8px 32px rgba(0, 0, 0, 0.13);
 
   /* === Sidebar === */
   --sidebar-width: 256px;
   --sidebar-collapsed-width: 72px;
-  --sidebar-bg: rgba(255, 255, 255, 0.72);
-  --sidebar-shadow: 0 8px 32px rgba(26, 58, 92, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+  --sidebar-bg: #ffffff;
+  --sidebar-shadow: 0 8px 32px rgba(26, 58, 92, 0.12),
+    0 2px 8px rgba(0, 0, 0, 0.06);
   --sidebar-border: rgba(26, 58, 92, 0.1);
   --sidebar-blur: 20px;
   --sidebar-margin: 12px;
@@ -56,30 +57,30 @@
   --radius-full: 9999px;
 
   /* === Status Colors === */
-  --status-running: #3B82F6;
-  --status-completed: #10B981;
-  --status-failed: #EF4444;
-  --status-pending-approval: #C9A84C;
-  --status-needs-human: #F97316;
-  --status-paused: #8B5CF6;
-  --status-queued: #6B7280;
-  --status-timeout: #DC2626;
+  --status-running: #3b82f6;
+  --status-completed: #10b981;
+  --status-failed: #ef4444;
+  --status-pending-approval: #c9a84c;
+  --status-needs-human: #f97316;
+  --status-paused: #8b5cf6;
+  --status-queued: #6b7280;
+  --status-timeout: #dc2626;
 
   /* === Risk Colors === */
-  --risk-low: #10B981;
-  --risk-medium: #F59E0B;
-  --risk-high: #EF4444;
-  --risk-critical: #991B1B;
+  --risk-low: #10b981;
+  --risk-medium: #f59e0b;
+  --risk-high: #ef4444;
+  --risk-critical: #991b1b;
 
   /* === Charts === */
-  --chart-axis: #D1D5DB;
-  --chart-grid: #E5E7EB;
-  --chart-blue: #1A3A5C;
-  --chart-gold: #C9A84C;
-  --chart-green: #10B981;
-  --chart-red: #EF4444;
-  --chart-purple: #8B5CF6;
-  --chart-cyan: #06B6D4;
+  --chart-axis: #d1d5db;
+  --chart-grid: #e5e7eb;
+  --chart-blue: #1a3a5c;
+  --chart-gold: #c9a84c;
+  --chart-green: #10b981;
+  --chart-red: #ef4444;
+  --chart-purple: #8b5cf6;
+  --chart-cyan: #06b6d4;
 
   /* === Transitions === */
   --transition-fast: 150ms ease;

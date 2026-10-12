@@ -20,20 +20,20 @@ type TaskStatus =
   | "canceled";
 
 const statusConfig: Record<string, { bg: string; text: string }> = {
-  pending:          { bg: "bg-amber-50",   text: "text-amber-700" },
-  approved:         { bg: "bg-green-50",   text: "text-green-700" },
-  rejected:         { bg: "bg-red-50",     text: "text-red-700" },
-  running:          { bg: "bg-blue-50",    text: "text-blue-700" },
-  completed:        { bg: "bg-green-50",   text: "text-green-700" },
-  failed:           { bg: "bg-red-50",     text: "text-red-700" },
-  pending_approval: { bg: "bg-amber-50",   text: "text-amber-700" },
-  needs_human:      { bg: "bg-orange-50",  text: "text-orange-700" },
-  paused:           { bg: "bg-purple-50",  text: "text-purple-700" },
-  queued:           { bg: "bg-gray-50",    text: "text-gray-600" },
-  timeout:          { bg: "bg-red-50",     text: "text-red-800" },
-  created:          { bg: "bg-sky-50",     text: "text-sky-700" },
-  terminated:       { bg: "bg-gray-100",   text: "text-gray-700" },
-  canceled:         { bg: "bg-gray-100",   text: "text-gray-600" },
+  pending: { bg: "bg-amber-50", text: "text-amber-700" },
+  approved: { bg: "bg-green-50", text: "text-green-700" },
+  rejected: { bg: "bg-red-50", text: "text-red-700" },
+  running: { bg: "bg-blue-50", text: "text-blue-700" },
+  completed: { bg: "bg-green-50", text: "text-green-700" },
+  failed: { bg: "bg-red-50", text: "text-red-700" },
+  pending_approval: { bg: "bg-amber-50", text: "text-amber-700" },
+  needs_human: { bg: "bg-orange-50", text: "text-orange-700" },
+  paused: { bg: "bg-purple-50", text: "text-purple-700" },
+  queued: { bg: "bg-gray-50", text: "text-gray-600" },
+  timeout: { bg: "bg-red-50", text: "text-red-800" },
+  created: { bg: "bg-sky-50", text: "text-sky-700" },
+  terminated: { bg: "bg-gray-100", text: "text-gray-700" },
+  canceled: { bg: "bg-gray-100", text: "text-gray-600" },
 };
 
 const statusLabelKeys: Record<string, string> = {
@@ -59,24 +59,28 @@ type StatusBadgeProps = {
 };
 
 export function StatusBadge({ status, className }: StatusBadgeProps) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const procurementLabels: Record<string, [string, string]> = {
+    awaiting_approval: ["待审批", "Awaiting approval"],
+    ready: ["待执行", "Ready"],
+    manual_completed: ["人工完成", "Manually completed"],
+    skipped: ["已跳过", "Skipped"],
+    resolved: ["已处理", "Resolved"],
+    not_connected: ["未接入 · not_connected", "Not connected"],
+    timed_out: ["超时", "Timed out"],
+  };
   const config = statusConfig[status] ?? {
     bg: "bg-gray-50",
     text: "text-gray-600",
   };
-  const label = statusLabelKeys[status]
-    ? t(statusLabelKeys[status] as MessageKey)
-    : status;
+  const label =
+    procurementLabels[status]?.[locale === "zh" ? 0 : 1] ??
+    (statusLabelKeys[status]
+      ? t(statusLabelKeys[status] as MessageKey)
+      : status);
 
   return (
-    <span
-      className={cn(
-        "glass-badge",
-        config.bg,
-        config.text,
-        className,
-      )}
-    >
+    <span className={cn("glass-badge", config.bg, config.text, className)}>
       {label}
     </span>
   );

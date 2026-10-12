@@ -163,6 +163,7 @@ function createIdempotencyKey(): string {
 export function ProcurementWorkbenchPage() {
   const { t } = useI18n();
   const isMounted = useRef(false);
+  const attemptKeys = useRef<Partial<Record<SupplierKey, string>>>({});
   const [organizationId, setOrganizationId] = useState("");
   const [contexts, setContexts] = useState<ContextResponse>({
     departments: [],
@@ -279,7 +280,8 @@ export function ProcurementWorkbenchPage() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": createIdempotencyKey(),
+          "Idempotency-Key": (attemptKeys.current[page.key] ??=
+            createIdempotencyKey()),
         },
         body: JSON.stringify({
           organization_id: organizationId,
@@ -342,15 +344,15 @@ export function ProcurementWorkbenchPage() {
     if (loading || !organizationId || !departmentId || !categoryId) return;
     setLoading(true);
     setError(null);
-    setQuotes([]);
     setComparison(null);
-    setRuns(initialRuns());
 
-    const taskIds: string[] = [];
-    const collectedQuotes: Quote[] = [];
+    const collectedQuotes: Quote[] = [...quotes];
+    const taskIds: string[] = collectedQuotes.map((q) => q.task_id);
     try {
       for (const page of SUPPLIER_PAGES) {
         if (!isMounted.current) return;
+        if (["completed", "awaiting_approval"].includes(runs[page.key].state))
+          continue;
         try {
           updateRun(page.key, { state: "running", message: null });
           const result = await startQuote(page);
@@ -393,7 +395,7 @@ export function ProcurementWorkbenchPage() {
           });
         } catch (runError) {
           updateRun(page.key, { state: "error", message: errorText(runError) });
-          throw runError;
+          if (isMounted.current) setError(errorText(runError));
         }
       }
       if (collectedQuotes.length === SUPPLIER_PAGES.length) {
@@ -449,6 +451,14 @@ export function ProcurementWorkbenchPage() {
     }
   }
 
+  function resetCollection() {
+    attemptKeys.current = {};
+    setRuns(initialRuns());
+    setQuotes([]);
+    setComparison(null);
+    setError(null);
+  }
+
   const noContext =
     !loading && (!contexts.departments.length || !contexts.categories.length);
 
@@ -465,16 +475,28 @@ export function ProcurementWorkbenchPage() {
           className="mt-1 text-sm"
           style={{ color: "var(--procurerpa-text-secondary)" }}
         >
-          {t("procurement.subtitle")}
+          {t("procurement.subtitle")} · controlled_demo · 仅开发环境受控页面
         </p>
       </div>
 
+      <a
+        className="inline-block text-sm text-blue-700 underline"
+        href="/enterprise/tasks"
+      >
+        查看采购任务、历史报价与比价
+      </a>
       {error && (
         <div
           className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700"
           role="alert"
         >
-          {error}
+          {error}{" "}
+          <button
+            className="underline"
+            onClick={() => window.location.reload()}
+          >
+            重新加载页面
+          </button>
         </div>
       )}
 
@@ -505,7 +527,10 @@ export function ProcurementWorkbenchPage() {
                 disabled={loading || !contexts.departments.length}
                 id="procurement-department"
                 value={departmentId}
-                onChange={(event) => setDepartmentId(event.target.value)}
+                onChange={(event) => {
+                  resetCollection();
+                  setDepartmentId(event.target.value);
+                }}
               >
                 {contexts.departments.map((department) => (
                   <option
@@ -529,7 +554,10 @@ export function ProcurementWorkbenchPage() {
                 disabled={loading || !contexts.categories.length}
                 id="procurement-category"
                 value={categoryId}
-                onChange={(event) => setCategoryId(event.target.value)}
+                onChange={(event) => {
+                  resetCollection();
+                  setCategoryId(event.target.value);
+                }}
               >
                 {contexts.categories.map((category) => (
                   <option
@@ -593,6 +621,16 @@ export function ProcurementWorkbenchPage() {
               ? t("procurement.collecting")
               : t("procurement.startCollection")}
           </button>
+          {Object.values(runs).every((run) => run.state === "completed") && (
+            <button
+              type="button"
+              className="glass-btn-secondary ml-3"
+              disabled={loading}
+              onClick={resetCollection}
+            >
+              新建一轮采集
+            </button>
+          )}
         </form>
       </GlassCard>
 
@@ -631,7 +669,19 @@ export function ProcurementWorkbenchPage() {
                   style={{ color: "var(--procurerpa-text-secondary)" }}
                 >
                   <div>
-                    {t("procurement.taskId")}: {run.taskId ?? "—"}
+                    {t("procurement.taskId")}:{" "}
+                    {run.taskId ? (
+                      <a
+                        className="text-blue-700 underline"
+                        href={
+                          "/enterprise/tasks/" + encodeURIComponent(run.taskId)
+                        }
+                      >
+                        {run.taskId}
+                      </a>
+                    ) : (
+                      "—"
+                    )}
                   </div>
                   <div>
                     {t("procurement.quoteId")}: {run.quoteId ?? "—"}

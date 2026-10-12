@@ -1,42 +1,34 @@
-import GitHubButton from "react-github-btn";
-import { useMatch, useSearchParams } from "react-router-dom";
+import { useLocation, useMatch, useSearchParams } from "react-router-dom";
 import { NavigationHamburgerMenu } from "./NavigationHamburgerMenu";
 import { LanguageSwitcher } from "@/components/enterprise/LanguageSwitcher";
-
+import { useAuthStore } from "@/store/AuthStore";
 function Header() {
-  const [searchParams] = useSearchParams();
-  const embed = searchParams.get("embed");
-  const match =
-    useMatch("/workflows/:workflowPermanentId/edit") ||
+  const [params] = useSearchParams();
+  const location = useLocation();
+  const match = useMatch("/workflows/:workflowPermanentId/edit");
+  const displayName = useAuthStore((s) => s.displayName);
+  if (
+    match ||
     location.pathname.includes("build") ||
     location.pathname.includes("debug") ||
-    embed === "true";
-
-  if (match) {
+    params.get("embed") === "true"
+  )
     return null;
-  }
-
   return (
-    <header>
-      <div className="flex h-24 items-center px-6">
+    <header className="border-b border-slate-200 bg-white/80">
+      <div className="flex h-16 items-center gap-3 px-6">
         <NavigationHamburgerMenu />
+        <span className="text-sm font-semibold text-slate-600 lg:ml-64">
+          ProcureRPA Enterprise
+        </span>
         <div className="ml-auto flex items-center gap-4">
           <LanguageSwitcher />
-          <div className="h-7">
-            <GitHubButton
-              href="https://github.com/ProcureRPA Enterprise"
-              data-color-scheme="no-preference: dark; light: dark; dark: dark;"
-              data-size="large"
-              data-show-count="true"
-              aria-label="Star ProcureRPA Enterprise on GitHub"
-            >
-              Star
-            </GitHubButton>
-          </div>
+          <span className="hidden text-sm text-slate-600 sm:inline">
+            {displayName}
+          </span>
         </div>
       </div>
     </header>
   );
 }
-
 export { Header };

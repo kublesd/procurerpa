@@ -1,252 +1,247 @@
 import { useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { GlassCard } from "@/components/enterprise/GlassCard";
+import { StatusBadge } from "@/components/enterprise/StatusBadge";
 import { RiskBadge } from "@/components/enterprise/RiskBadge";
-import { Icon } from "@/components/Icon";
-import { useI18n } from "@/i18n/useI18n";
-import { authFetch } from "@/util/authFetch";
-
-type ApprovalRequest = {
+import {
+  enterpriseJson,
+  useEnterpriseQuery,
+  useEnterpriseUser,
+} from "../shared";
+import { QueryFeedback } from "../EnterpriseAccess";
+type Approval = {
   approval_id: string;
   task_id: string;
+  status: string;
   risk_level: string;
   risk_reason: string;
   operation_description: string | null;
+  requester_user_id: string;
   department_id: string;
+  category_id: string | null;
+  approver_department_id: string;
   requested_at: string;
-  screenshot_path?: string | null;
-  status: string;
+  total_amount_cny: string | null;
+  matched_threshold_cny: string | null;
+  policy_version: string | null;
 };
-
-async function responseError(response: Response): Promise<Error> {
-  try {
-    const body = await response.json();
-    if (typeof body.detail === "string") return new Error(body.detail);
-  } catch {
-    // Use the HTTP status below when the response is not JSON.
-  }
-  return new Error(`HTTP ${response.status}`);
-}
-
-function ApprovalCard({
-  item,
-  onApprove,
-  onReject,
-}: {
-  item: ApprovalRequest;
-  onApprove: (id: string, note: string) => void;
-  onReject: (id: string, note: string) => void;
-}) {
-  const { t } = useI18n();
-  const [remark, setRemark] = useState("");
-
+export function ApprovalsPage() {
+  const approvals = useEnterpriseQuery<Approval[]>("/approvals/pending");
   return (
-    <GlassCard hoverable={false} padding="md" className="mb-4">
-      <div className="flex gap-6">
-        <div className="hidden w-48 shrink-0 sm:block">
-          {item.screenshot_path ? (
-            <img
-              src={item.screenshot_path}
-              alt="Task screenshot"
-              className="h-32 w-full rounded-lg border border-gray-200 object-cover"
-            />
-          ) : (
-            <div className="flex h-32 w-full items-center justify-center rounded-lg border border-dashed border-gray-300 bg-gray-50">
-              <span className="text-xs text-gray-400">
-                {t("approvals.noScreenshot")}
-              </span>
-            </div>
-          )}
-        </div>
-
-        <div className="flex-1">
-          <div className="mb-2 flex items-center gap-3">
-            <RiskBadge level={item.risk_level} />
-            <span
-              className="text-xs"
-              style={{ color: "var(--procurerpa-text-muted)" }}
-            >
-              {item.department_id}
-            </span>
-          </div>
-          <h3
-            className="text-sm font-semibold"
-            style={{ color: "var(--procurerpa-text-primary)" }}
-          >
-            {item.operation_description ?? item.task_id}
-          </h3>
-          <p
-            className="mt-1 text-sm"
-            style={{ color: "var(--procurerpa-text-secondary)" }}
-          >
-            {item.risk_reason}
+    <div className="space-y-6 p-4 md:p-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">审批中心</h1>
+          <p className="mt-2 text-sm text-slate-500">
+            待办以当前部门、品类与审批策略为准。
           </p>
-          <div
-            className="mt-2 flex items-center gap-4 text-xs"
-            style={{ color: "var(--procurerpa-text-muted)" }}
-          >
-            <span>
-              {t("approvals.task")}: {item.task_id}
-            </span>
-            <span>
-              {t("approvals.requested")}:{" "}
-              {new Date(item.requested_at).toLocaleString()}
-            </span>
-          </div>
         </div>
-
-        <div className="flex shrink-0 flex-col gap-2" style={{ width: 180 }}>
-          <input
-            className="glass-input text-xs"
-            placeholder={t("approvals.remarkPlaceholder")}
-            value={remark}
-            onChange={(event) => setRemark(event.target.value)}
-          />
-          <button
-            className="glass-btn-primary flex items-center justify-center gap-1 text-sm"
-            onClick={() => onApprove(item.approval_id, remark)}
-          >
-            <Icon name="check-circle" size={16} color="white" />
-            {t("approvals.approve")}
-          </button>
-          <button
-            className="flex items-center justify-center gap-1 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50"
-            onClick={() => onReject(item.approval_id, remark)}
-          >
-            <Icon name="x-circle" size={16} color="#DC2626" />
-            {t("approvals.reject")}
-          </button>
-        </div>
+        <button
+          className="glass-btn-secondary"
+          onClick={() => void approvals.refetch()}
+        >
+          刷新
+        </button>
       </div>
-    </GlassCard>
+      <QueryFeedback
+        loading={approvals.isPending}
+        error={approvals.error}
+        retry={() => void approvals.refetch()}
+      />
+      {!approvals.error && approvals.data?.length === 0 && (
+        <GlassCard hoverable={false}>暂无待审批事项</GlassCard>
+      )}
+      {!approvals.error &&
+        approvals.data?.map((a) => (
+          <GlassCard key={a.approval_id} hoverable={false}>
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <RiskBadge level={a.risk_level} />
+                <h2 className="my-3 font-semibold">
+                  {a.operation_description || a.task_id}
+                </h2>
+                <p className="text-sm text-slate-600">{a.risk_reason}</p>
+                <p className="mt-2 text-sm">
+                  {a.total_amount_cny ?? "金额未记录"}
+                  {a.total_amount_cny != null ? " CNY" : ""} ·{" "}
+                  {new Date(a.requested_at).toLocaleString()}
+                </p>
+              </div>
+              <Link
+                className="glass-btn-primary"
+                to={encodeURIComponent(a.approval_id)}
+              >
+                查看并审批
+              </Link>
+            </div>
+          </GlassCard>
+        ))}
+    </div>
   );
 }
-
-export function ApprovalsPage() {
-  const { t } = useI18n();
-  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-
+export function ApprovalDetailPage() {
+  const { approvalId = "" } = useParams();
+  const path = "/approvals/" + encodeURIComponent(approvalId);
+  const query = useEnterpriseQuery<Approval>(path);
+  const user = useEnterpriseUser();
+  const pending = useEnterpriseQuery<Approval[]>(
+    "/approvals/pending",
+    !!user.data?.is_approver,
+  );
+  const client = useQueryClient();
+  const [note, setNote] = useState("");
+  const data = query.data;
   useEffect(() => {
-    let active = true;
-    authFetch("/api/v1/enterprise/approvals/pending")
-      .then(async (response) => {
-        if (!response.ok) throw await responseError(response);
-        return response.json() as Promise<ApprovalRequest[]>;
-      })
-      .then((data) => {
-        if (active) setApprovals(data);
-      })
-      .catch((reason: unknown) => {
-        if (!active) return;
-        setApprovals([]);
-        setError(
-          reason instanceof Error ? reason.message : t("approvals.loadError"),
-        );
-      })
-      .finally(() => {
-        if (active) setLoading(false);
+    if (data?.status !== "pending") return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    async function watch() {
+      try {
+        try {
+          await enterpriseJson(path + "/updates", {
+            signal: controller.signal,
+          });
+        } catch {
+          if (controller.signal.aborted) return;
+          await enterpriseJson(path, { signal: controller.signal });
+        }
+      } catch {
+        /* Database query below renders errors and remains authoritative. */
+      }
+      if (controller.signal.aborted) return;
+      await client.invalidateQueries({
+        queryKey: ["enterprise", user.data?.org_id, user.data?.user_id, path],
       });
-    return () => {
-      active = false;
-    };
-  }, [t]);
-
-  async function handleDecision(
-    id: string,
-    decision: "approve" | "reject",
-    note: string,
-  ) {
-    setActionError(null);
-    try {
-      const response = await authFetch(
-        `/api/v1/enterprise/approvals/${id}/${decision}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ note }),
-        },
-      );
-      if (!response.ok) throw await responseError(response);
-      setApprovals((previous) =>
-        previous.filter((item) => item.approval_id !== id),
-      );
-    } catch (reason: unknown) {
-      setActionError(
-        reason instanceof Error ? reason.message : t("approvals.actionError"),
-      );
+      if (!controller.signal.aborted)
+        timer = setTimeout(() => void watch(), 2000);
     }
-  }
-
-  return (
-    <div className="space-y-6 p-6">
-      <div className="flex items-center gap-3">
-        <Icon name="approval" size={24} color="var(--procurerpa-blue)" />
-        <h1
-          className="text-xl font-bold"
-          style={{ color: "var(--procurerpa-blue)" }}
-        >
-          {t("approvals.title")}
-        </h1>
-        <span
-          className="ml-2 rounded-full px-2.5 py-0.5 text-xs font-bold"
-          style={{ background: "var(--procurerpa-gold)", color: "white" }}
-        >
-          {approvals.length}
-        </span>
+    void watch();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [path, data?.status, client, user.data?.org_id, user.data?.user_id]);
+  const action = useMutation({
+    mutationFn: (kind: string) =>
+      enterpriseJson(path + "/" + kind, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: kind === "continue" ? undefined : JSON.stringify({ note }),
+      }),
+    onSettled: () => {
+      void query.refetch();
+      if (user.data?.is_approver) void pending.refetch();
+    },
+  });
+  if (!data || query.error)
+    return (
+      <div className="p-6">
+        <QueryFeedback
+          loading={query.isPending}
+          error={query.error}
+          retry={() => void query.refetch()}
+        />
       </div>
-
-      {error && (
-        <div
-          role="alert"
-          className="rounded-lg bg-red-50 p-3 text-sm text-red-700"
-        >
-          {error}
+    );
+  const canDecide =
+    data.status === "pending" &&
+    !pending.error &&
+    pending.data?.some((a) => a.approval_id === approvalId);
+  return (
+    <div className="space-y-6 p-4 md:p-6">
+      <h1 className="text-2xl font-semibold">审批详情</h1>
+      <GlassCard hoverable={false}>
+        <div className="flex gap-3">
+          <StatusBadge status={data.status} />
+          <RiskBadge level={data.risk_level} />
         </div>
-      )}
-      {actionError && (
-        <div
-          role="alert"
-          className="rounded-lg bg-red-50 p-3 text-sm text-red-700"
-        >
-          {actionError}
-        </div>
-      )}
-      {loading && (
-        <p className="text-sm" style={{ color: "var(--procurerpa-text-muted)" }}>
-          {t("approvals.loading")}
-        </p>
-      )}
-
-      {!loading && !error && approvals.length === 0 && (
-        <GlassCard hoverable={false} padding="lg">
-          <div className="flex flex-col items-center justify-center py-12">
-            <Icon
-              name="check-circle"
-              size={48}
-              color="var(--status-completed)"
-            />
-            <p
-              className="mt-4 text-sm font-medium"
-              style={{ color: "var(--procurerpa-text-secondary)" }}
-            >
-              {t("approvals.allCaughtUp")}
-            </p>
+        <h2 className="my-4 font-semibold">
+          {data.operation_description || data.task_id}
+        </h2>
+        <p>{data.risk_reason}</p>
+        <dl className="my-4 grid gap-3 text-sm sm:grid-cols-2">
+          <div>
+            <dt className="text-slate-500">采购金额</dt>
+            <dd>
+              {data.total_amount_cny ?? "未记录"}{" "}
+              {data.total_amount_cny != null && "CNY"}
+            </dd>
           </div>
-        </GlassCard>
-      )}
-
-      {!loading &&
-        !error &&
-        approvals.map((item) => (
-          <ApprovalCard
-            key={item.approval_id}
-            item={item}
-            onApprove={(id, note) => handleDecision(id, "approve", note)}
-            onReject={(id, note) => handleDecision(id, "reject", note)}
-          />
-        ))}
+          <div>
+            <dt className="text-slate-500">审批策略 / 命中阈值</dt>
+            <dd>
+              {data.policy_version ?? "旧记录未记录"} /{" "}
+              {data.matched_threshold_cny ?? "未记录"}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-slate-500">审批部门</dt>
+            <dd>{data.approver_department_id}</dd>
+          </div>
+          <div>
+            <dt className="text-slate-500">请求人</dt>
+            <dd>{data.requester_user_id}</dd>
+          </div>
+        </dl>
+        <QueryFeedback error={action.error} />
+        <QueryFeedback error={pending.error} />
+        {canDecide && (
+          <div className="space-y-3">
+            <label className="block">
+              审批备注
+              <textarea
+                className="glass-input mt-2 w-full"
+                maxLength={2000}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+              />
+            </label>
+            <div className="flex gap-3">
+              <button
+                className="glass-btn-primary"
+                disabled={action.isPending}
+                onClick={() => action.mutate("approve")}
+              >
+                批准
+              </button>
+              <button
+                className="glass-btn-secondary"
+                disabled={action.isPending}
+                onClick={() => action.mutate("reject")}
+              >
+                拒绝
+              </button>
+            </div>
+          </div>
+        )}
+        <p className="my-4 text-sm text-slate-500">
+          批准仅记录审批决定；采购任务仍需申请人显式继续。
+        </p>
+        {data.status === "approved" &&
+          user.data?.is_operator &&
+          (data.requester_user_id === user.data.user_id ||
+            user.data.is_admin) && (
+            <Link
+              className="glass-btn-primary mr-3"
+              to={"/enterprise/tasks/" + encodeURIComponent(data.task_id)}
+            >
+              前往任务手动继续
+            </Link>
+          )}
+        <Link
+          className="text-blue-700 underline"
+          to={"/enterprise/tasks/" + encodeURIComponent(data.task_id)}
+        >
+          查看采购任务
+        </Link>
+        <button
+          className="glass-btn-secondary ml-3"
+          onClick={() => void query.refetch()}
+        >
+          刷新
+        </button>
+      </GlassCard>
     </div>
   );
 }

@@ -37,7 +37,7 @@ function Logo() {
         x="42"
         y="30"
         fontFamily="'Georgia', 'Times New Roman', serif"
-        fontSize="28"
+        fontSize="20"
         fontWeight="700"
         fontStyle="italic"
         letterSpacing="-0.5"

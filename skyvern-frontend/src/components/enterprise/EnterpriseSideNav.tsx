@@ -1,130 +1,131 @@
-/**
- * Enterprise sidebar navigation with frosted-glass style and i18n support.
- */
-
 import { NavLink, useNavigate } from "react-router-dom";
 import { Icon, type IconName } from "@/components/Icon";
-import { cn } from "@/util/utils";
-import { useSidebarStore } from "@/store/SidebarStore";
 import { useI18n } from "@/i18n/useI18n";
 import { useAuthStore } from "@/store/AuthStore";
-import type { MessageKey } from "@/i18n/locales";
+import {
+  canAccess,
+  useEnterpriseUser,
+  type Access,
+} from "@/routes/enterprise/shared";
 
-type NavItem = {
-  labelKey: MessageKey;
+const items: {
+  zh: string;
+  en: string;
   to: string;
   icon: IconName;
-};
-
-const buildSection: NavItem[] = [
-  { labelKey: "nav.discover", to: "/discover", icon: "search" },
-  { labelKey: "nav.tasks", to: "/tasks", icon: "task" },
-  { labelKey: "nav.workflows", to: "/workflows", icon: "workflow" },
-  { labelKey: "nav.runs", to: "/runs", icon: "refresh" },
+  access: Access;
+}[] = [
+  {
+    zh: "总览",
+    en: "Overview",
+    to: "dashboard",
+    icon: "dashboard",
+    access: "operator",
+  },
+  {
+    zh: "报价采集",
+    en: "Collect quotes",
+    to: "procurement",
+    icon: "task",
+    access: "operator",
+  },
+  {
+    zh: "采购任务",
+    en: "Procurement tasks",
+    to: "tasks",
+    icon: "task",
+    access: "read",
+  },
+  {
+    zh: "审批中心",
+    en: "Approvals",
+    to: "approvals",
+    icon: "approval",
+    access: "approver",
+  },
+  {
+    zh: "人工核验",
+    en: "Human reviews",
+    to: "human-reviews",
+    icon: "check-circle",
+    access: "operator",
+  },
+  {
+    zh: "工作流模板",
+    en: "Templates",
+    to: "templates",
+    icon: "workflow",
+    access: "operator",
+  },
+  { zh: "审计追溯", en: "Audit", to: "audit", icon: "audit", access: "audit" },
 ];
-
-const enterpriseSection: NavItem[] = [
-  { labelKey: "nav.workflows", to: "/enterprise/templates", icon: "workflow" },
-  { labelKey: "nav.procurement", to: "/enterprise/procurement", icon: "task" },
-  { labelKey: "nav.dashboard", to: "/enterprise/dashboard", icon: "dashboard" },
-  { labelKey: "nav.approvals", to: "/enterprise/approvals", icon: "approval" },
-  { labelKey: "nav.auditLogs", to: "/enterprise/audit", icon: "audit" },
-];
-
-const generalSection: NavItem[] = [
-  { labelKey: "nav.settings", to: "/settings", icon: "settings" },
-];
-
-function NavSection({
-  titleKey,
-  items,
-  collapsed,
+export function EnterpriseSideNav({
+  collapsed = false,
 }: {
-  titleKey: MessageKey;
-  items: NavItem[];
-  collapsed: boolean;
+  collapsed?: boolean;
 }) {
-  const { t } = useI18n();
-
+  const { locale, t } = useI18n();
+  const user = useEnterpriseUser();
+  const logout = useAuthStore((s) => s.logout);
+  const navigate = useNavigate();
   return (
-    <div className="mb-6">
-      {!collapsed && (
-        <div
-          className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-widest"
-          style={{ color: "var(--procurerpa-text-muted)" }}
-        >
-          {t(titleKey)}
-        </div>
-      )}
-      <div className="space-y-1">
-        {items.map((item) => (
+    <nav
+      aria-label={locale === "zh" ? "主导航" : "Navigation"}
+      className="flex-1 overflow-y-auto py-2"
+    >
+      <p className="mb-3 px-3 text-xs text-slate-500">
+        {collapsed ? "PR" : "PROCUREMENT"}
+      </p>
+      {user.data &&
+        items
+          .filter((item) => canAccess(user.data, item.access))
+          .map((item) => (
+            <NavLink
+              key={item.to}
+              to={"/enterprise/" + item.to}
+              title={locale === "zh" ? item.zh : item.en}
+              className={({ isActive }) =>
+                "glass-nav-item " +
+                (isActive ? "active" : "") +
+                (collapsed ? "justify-center" : "")
+              }
+            >
+              <Icon name={item.icon} size={19} />
+              {!collapsed && (locale === "zh" ? item.zh : item.en)}
+            </NavLink>
+          ))}
+      <details className="mt-6 border-t pt-4">
+        <summary className="cursor-pointer px-3 text-xs text-slate-500">
+          {locale === "zh" ? "技术工具" : "Technical tools"}
+        </summary>
+        {[
+          ["/discover", t("nav.discover")],
+          ["/tasks", t("nav.tasks")],
+          ["/workflows", t("nav.workflows")],
+          ["/runs", t("nav.runs")],
+          ["/settings", t("nav.settings")],
+        ].map(([to, label]) => (
           <NavLink
-            key={item.to}
-            to={item.to}
-            className={({ isActive }) =>
-              cn("glass-nav-item", {
-                active: isActive,
-                "justify-center px-2": collapsed,
-              })
-            }
-            title={collapsed ? t(item.labelKey) : undefined}
+            key={to}
+            to={to ?? "/"}
+            title={label}
+            className="glass-nav-item text-sm"
           >
-            <Icon name={item.icon} size={20} />
-            {!collapsed && <span>{t(item.labelKey)}</span>}
+            {collapsed ? label?.slice(0, 2) : label}
           </NavLink>
         ))}
-      </div>
-    </div>
-  );
-}
-
-export function EnterpriseSideNav() {
-  const { collapsed } = useSidebarStore();
-  const { t } = useI18n();
-  const navigate = useNavigate();
-  const logout = useAuthStore((s) => s.logout);
-
-  function handleLogout() {
-    logout();
-    navigate("/login");
-  }
-
-  return (
-    <nav className="flex-1 overflow-y-auto py-2">
-      <NavSection
-        titleKey="nav.build"
-        items={buildSection}
-        collapsed={collapsed}
-      />
-      <NavSection
-        titleKey="nav.enterprise"
-        items={enterpriseSection}
-        collapsed={collapsed}
-      />
-      <NavSection
-        titleKey="nav.general"
-        items={generalSection}
-        collapsed={collapsed}
-      />
-
-      {/* Logout */}
-      <div
-        className="mt-2 border-t"
-        style={{ borderColor: "var(--glass-border)" }}
+      </details>
+      <button
+        className="glass-nav-item mt-6 w-full"
+        title={t("auth.logout")}
+        onClick={() => {
+          logout();
+          navigate("/login");
+        }}
       >
-        <button
-          type="button"
-          onClick={handleLogout}
-          className={cn("glass-nav-item w-full", {
-            "justify-center px-2": collapsed,
-          })}
-          title={collapsed ? t("auth.logout") : undefined}
-          style={{ cursor: "pointer", background: "none", border: "none" }}
-        >
-          <Icon name="logout" size={20} />
-          {!collapsed && <span>{t("auth.logout")}</span>}
-        </button>
-      </div>
+        <Icon name="logout" size={19} />
+        {!collapsed && t("auth.logout")}
+      </button>
     </nav>
   );
 }

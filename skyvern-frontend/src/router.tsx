@@ -39,6 +39,22 @@ import { LoginPage } from "@/routes/auth/LoginPage";
 import { AuthGuard } from "@/components/AuthGuard";
 import { EnterpriseCredentialProvider } from "@/components/EnterpriseCredentialProvider";
 
+import {
+  EnterpriseHome,
+  EnterpriseGate,
+} from "@/routes/enterprise/EnterpriseAccess";
+
+import {
+  ProcurementTasksPage,
+  ProcurementTaskPage,
+} from "@/routes/enterprise/procurement/ProcurementTasksPage";
+
+import {
+  HumanReviewsPage,
+  HumanReviewPage,
+} from "@/routes/enterprise/procurement/HumanReviewsPage";
+import { ApprovalDetailPage } from "@/routes/enterprise/approvals/ApprovalsPage";
+
 const router = createBrowserRouter([
   {
     path: "/login",
@@ -86,7 +102,7 @@ const router = createBrowserRouter([
       },
       {
         index: true,
-        element: <Navigate to="/discover" />,
+        element: <EnterpriseHome />,
       },
       {
         path: "tasks",
@@ -264,9 +280,58 @@ const router = createBrowserRouter([
         ],
       },
       {
+        path: "enterprise/human-reviews",
+        element: (
+          <EnterpriseGate access="operator">
+            <PageLayout />
+          </EnterpriseGate>
+        ),
+        children: [
+          { index: true, element: <HumanReviewsPage /> },
+          { path: ":reviewId", element: <HumanReviewPage /> },
+        ],
+      },
+      {
+        path: "enterprise/approvals/:approvalId",
+        element: (
+          <EnterpriseGate>
+            <ApprovalDetailPage />
+          </EnterpriseGate>
+        ),
+      },
+      {
+        path: "enterprise/tasks",
+        element: (
+          <EnterpriseGate>
+            <PageLayout />
+          </EnterpriseGate>
+        ),
+        children: [
+          { index: true, element: <ProcurementTasksPage /> },
+          { path: ":taskId", element: <ProcurementTaskPage /> },
+        ],
+      },
+      {
         path: "enterprise/templates",
         element: <PageLayout />,
-        children: [{ index: true, element: <WorkflowTemplatesPage /> }],
+        children: [
+          {
+            index: true,
+            element: (
+              <EnterpriseGate access="operator">
+                <WorkflowTemplatesPage />
+              </EnterpriseGate>
+            ),
+          },
+          {
+            path: "instances/:instanceId",
+            element: (
+              <EnterpriseGate access="operator">
+                <WorkflowTemplatesPage />
+              </EnterpriseGate>
+            ),
+          },
+        ],
       },
       {
         path: "enterprise/procurement",
@@ -274,7 +339,11 @@ const router = createBrowserRouter([
         children: [
           {
             index: true,
-            element: <ProcurementWorkbenchPage />,
+            element: (
+              <EnterpriseGate access="operator">
+                <ProcurementWorkbenchPage />
+              </EnterpriseGate>
+            ),
           },
         ],
       },
@@ -284,7 +353,11 @@ const router = createBrowserRouter([
         children: [
           {
             index: true,
-            element: <DashboardPage />,
+            element: (
+              <EnterpriseGate access="operator">
+                <DashboardPage />
+              </EnterpriseGate>
+            ),
           },
         ],
       },
@@ -294,7 +367,11 @@ const router = createBrowserRouter([
         children: [
           {
             index: true,
-            element: <ApprovalsPage />,
+            element: (
+              <EnterpriseGate access="approver">
+                <ApprovalsPage />
+              </EnterpriseGate>
+            ),
           },
         ],
       },
@@ -304,7 +381,11 @@ const router = createBrowserRouter([
         children: [
           {
             index: true,
-            element: <AuditLogsPage />,
+            element: (
+              <EnterpriseGate access="audit">
+                <AuditLogsPage />
+              </EnterpriseGate>
+            ),
           },
         ],
       },
